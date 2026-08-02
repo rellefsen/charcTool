@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 
 from config import (
@@ -15,6 +14,7 @@ from config import (
     STATUS_LABELS,
     SYNC_PACKET_DELAY,
 )
+from address_store import attach_addresses, ensure_default_addresses, read_address_map, update_address
 from csv_store import ensure_default_houses, init_csv, read_all, sort_rows_by_urgency, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
@@ -70,6 +70,9 @@ def _init_session_state() -> None:
     added = ensure_default_houses()
     if added:
         logger.info("Added %s default houses to CSV", added)
+    addr_added = ensure_default_addresses()
+    if addr_added:
+        logger.info("Added %s default addresses", addr_added)
     if "client" not in st.session_state:
         st.session_state.client = MeshtasticClient()
     if "receiver" not in st.session_state:
@@ -154,26 +157,47 @@ def _render_sidebar() -> None:
             value=st.session_state.get("force_full_sync", False),
         )
 
+        st.divider()
+        st.subheader("House addresses")
+        st.caption("Local only — **never transmitted** over the mesh.")
+        house_ids = [r["house_id"] for r in read_all()]
+        if house_ids:
+            edit_house = st.selectbox("Edit address for", house_ids, key="edit_address_house")
+            address_map = read_address_map()
+            new_address = st.text_input(
+                "Street address",
+                value=address_map.get(edit_house.upper(), ""),
+                key="edit_address_text",
+            )
+            if st.button("Save address", use_container_width=True):
+                update_address(edit_house, new_address)
+                st.toast(f"Saved address for {edit_house}")
+                st.rerun()
+
 
 def _render_status_table(rows: list[dict]) -> None:
     st.subheader("Neighborhood Status Board")
+    rows = attach_addresses(rows)
 
-    header = st.columns([2, 3, 3, 2])
+    header = st.columns([1.5, 2.5, 2, 2.5, 1.5])
     header[0].markdown("**House**")
-    header[1].markdown("**Current Status**")
-    header[2].markdown("**Change Status**")
-    header[3].markdown("**Last Updated**")
+    header[1].markdown("**Address**")
+    header[2].markdown("**Current Status**")
+    header[3].markdown("**Change Status**")
+    header[4].markdown("**Last Updated**")
 
     for row in rows:
         house_id = row["house_id"]
         current = row["status_code"]
         ts = row.get("timestamp", "")
+        address = row.get("address", "—")
 
-        cols = st.columns([2, 3, 3, 2])
+        cols = st.columns([1.5, 2.5, 2, 2.5, 1.5])
         cols[0].markdown(f"### {house_id}")
-        cols[1].markdown(_status_pill(current), unsafe_allow_html=True)
+        cols[1].markdown(f"**{address}**")
+        cols[2].markdown(_status_pill(current), unsafe_allow_html=True)
 
-        selected = cols[2].selectbox(
+        selected = cols[3].selectbox(
             f"Status for {house_id}",
             STATUS_CODES,
             index=STATUS_CODES.index(current),
@@ -190,7 +214,44 @@ def _render_status_table(rows: list[dict]) -> None:
             )
         except ValueError:
             display_ts = ts
+        cols[4].caption(display_ts)
+
+
+def _render_readonly_board(
+    rows: list[dict],
+    pending_house_ids: set[str] | None = None,
+) -> None:
+    """Read-only neighborhood board for Receiver mode (no edits, all houses)."""
+    rows = attach_addresses(rows)
+    pending_house_ids = pending_house_ids or set()
+
+    header = st.columns([1.5, 2.5, 2, 1.5, 1.5])
+    header[0].markdown("**House**")
+    header[1].markdown("**Address**")
+    header[2].markdown("**Status**")
+    header[3].markdown("**Updated**")
+    header[4].markdown("**Changed**")
+
+    for row in rows:
+        house_id = row["house_id"]
+        current = row["status_code"]
+        ts = row.get("timestamp", "")
+        address = row.get("address", "—")
+        changed = house_id.upper() in pending_house_ids
+
+        cols = st.columns([1.5, 2.5, 2, 1.5, 1.5])
+        cols[0].markdown(f"### {house_id}")
+        cols[1].markdown(address)
+        cols[2].markdown(_status_pill(current), unsafe_allow_html=True)
+
+        try:
+            display_ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime(
+                "%m/%d %H:%M"
+            )
+        except ValueError:
+            display_ts = ts
         cols[3].caption(display_ts)
+        cols[4].markdown("**Yes**" if changed else "—")
 
 
 def _apply_pending_edits() -> None:
@@ -384,24 +445,12 @@ def _render_receiver_mode() -> None:
 
     st.divider()
 
+    pending_ids = {c.house_id.upper() for c in pending}
     if pending:
         st.subheader(f"Changes since watch started ({len(pending)})")
         st.caption(
-            "Houses that differ from when you opened Receiver mode or last marked reviewed."
-        )
-        change_rows = [
-            {
-                "House": c.house_id,
-                "Was": c.previous_status or "—",
-                "Now": c.current_status,
-                "Updated": _format_change_time(c.timestamp),
-            }
-            for c in pending
-        ]
-        st.dataframe(
-            pd.DataFrame(change_rows),
-            use_container_width=True,
-            hide_index=True,
+            "Updated houses are marked **Changed** in the board below. "
+            "Addresses are local only and never sent over the mesh."
         )
     else:
         st.success("No pending changes — board matches your watch baseline.")
@@ -416,34 +465,9 @@ def _render_receiver_mode() -> None:
                 )
 
     st.divider()
-    st.subheader("Full neighborhood board")
-    st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
-
-    show_changed_only = st.checkbox(
-        "Show changed houses only",
-        value=False,
-        disabled=len(pending) == 0,
-    )
-
-    display_rows = rows
-    if show_changed_only and pending:
-        pending_ids = {c.house_id for c in pending}
-        display_rows = [r for r in rows if r["house_id"].upper() in pending_ids]
-
-    df = pd.DataFrame(display_rows)
-    if not df.empty:
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "house_id": st.column_config.TextColumn("House", width="small"),
-                "status_code": st.column_config.TextColumn("Status", width="medium"),
-                "timestamp": st.column_config.TextColumn("Updated", width="medium"),
-            },
-        )
-    else:
-        st.caption("No rows to display.")
+    st.subheader(f"Neighborhood board ({len(rows)} houses)")
+    st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
+    _render_readonly_board(rows, pending_ids)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
     c1, c2, c3 = st.columns(3)

@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .streamlit/secrets.toml
 data/last_mesh_sync.csv
+data/house_addresses.csv

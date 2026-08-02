@@ -7,6 +7,7 @@ from packet_codec import (
     encode_bulk_sync_chunks,
     encode_status,
 )
+from address_store import attach_addresses, default_address, update_address
 from csv_store import sort_rows_by_urgency
 from meshtastic_client import MeshtasticClient
 from sync_state import (
@@ -57,6 +58,26 @@ def test_receiver_changes() -> None:
     assert changes[0].previous_status == "GREEN"
     assert changes[0].current_status == "YELLOW"
     print("receiver_changes: OK")
+
+
+def test_addresses_local_only() -> None:
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "addresses.csv"
+        update_address("H001", "142 Oak St", path=path)
+        rows = [{"house_id": "H001", "status_code": "RED", "timestamp": "t"}]
+        enriched = attach_addresses(rows, path=path)
+        assert enriched[0]["address"] == "142 Oak St"
+
+        from packet_codec import encode_status
+
+        assert encode_status("H001", "RED") == "NS:H001:R"
+        assert "Oak" not in encode_status("H001", "RED")
+
+    assert default_address("H012") == "12 Oak St"
+    print("addresses: OK")
 
 
 def test_urgency_sort() -> None:
@@ -127,6 +148,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         test_sync_state_delta(Path(tmp))
     test_receiver_changes()
+    test_addresses_local_only()
     test_urgency_sort()
     test_mock_fallback()
     print("All smoke tests passed.")
