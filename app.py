@@ -12,13 +12,13 @@ from config import (
     STATUS_CODES,
     STATUS_COLORS,
     STATUS_LABELS,
-    SYNC_PACKET_DELAY,
 )
 from address_store import attach_addresses, ensure_default_addresses, read_address_map, update_address
 from csv_store import ensure_default_houses, init_csv, read_all, sort_rows_by_urgency, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
+from settings_store import SettingsError, load_settings, save_settings
 from sync_state import (
     compute_changes_since_baseline,
     compute_sync_rows,
@@ -29,6 +29,40 @@ from sync_state import (
 )
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _create_client(settings: dict) -> MeshtasticClient:
+    return MeshtasticClient(
+        dev_path=settings.get("meshtastic_port"),
+        channel_name=str(settings["channel_name"]),
+    )
+
+
+def _sync_packet_delay() -> float:
+    return float(st.session_state.app_settings["sync_packet_delay"])
+
+
+def _init_session_state() -> None:
+    init_csv()
+    added = ensure_default_houses()
+    if added:
+        logger.info("Added %s default houses to CSV", added)
+    addr_added = ensure_default_addresses()
+    if addr_added:
+        logger.info("Added %s default addresses", addr_added)
+    if "app_settings" not in st.session_state:
+        st.session_state.app_settings = load_settings()
+    if "client" not in st.session_state:
+        st.session_state.client = _create_client(st.session_state.app_settings)
+    if "receiver" not in st.session_state:
+        st.session_state.receiver = MeshReceiver(st.session_state.client)
+    if "mode" not in st.session_state:
+        st.session_state.mode = "Transmitter"
+    if "pending_edits" not in st.session_state:
+        st.session_state.pending_edits = {}
+    if "last_sync_log" not in st.session_state:
+        st.session_state.last_sync_log = []
+
 
 # ---------------------------------------------------------------------------
 # Page config & accessible styling
@@ -65,26 +99,6 @@ st.markdown(
 )
 
 
-def _init_session_state() -> None:
-    init_csv()
-    added = ensure_default_houses()
-    if added:
-        logger.info("Added %s default houses to CSV", added)
-    addr_added = ensure_default_addresses()
-    if addr_added:
-        logger.info("Added %s default addresses", addr_added)
-    if "client" not in st.session_state:
-        st.session_state.client = MeshtasticClient()
-    if "receiver" not in st.session_state:
-        st.session_state.receiver = MeshReceiver(st.session_state.client)
-    if "mode" not in st.session_state:
-        st.session_state.mode = "Transmitter"
-    if "pending_edits" not in st.session_state:
-        st.session_state.pending_edits = {}
-    if "last_sync_log" not in st.session_state:
-        st.session_state.last_sync_log = []
-
-
 def _status_pill(code: str) -> str:
     bg = STATUS_BG.get(code, "#F3F4F6")
     fg = STATUS_COLORS.get(code, "#111827")
@@ -118,16 +132,70 @@ def _render_sidebar() -> None:
         st.divider()
         st.subheader("Radio")
         info = st.session_state.client.connection_info()
+        if info.mock_mode:
+            st.caption("Status: **mock mode** (no radio)")
+        elif info.port:
+            st.caption(f"Connected: `{info.port}`")
         st.caption(f"Mesh channel: **{info.channel_name}**")
         if info.channel_index is not None:
             st.caption(f"Channel index: {info.channel_index}")
-        ports = list_serial_ports()
-        if ports:
-            st.caption("Detected serial ports:")
-            for p in ports:
-                st.code(p)
-        else:
-            st.caption("No serial ports detected.")
+
+        with st.expander("Radio settings", expanded=False):
+            settings = st.session_state.app_settings
+            ports = list_serial_ports()
+            port_options = ["Auto-detect", *ports]
+            current_port = settings.get("meshtastic_port")
+            if current_port and current_port not in port_options:
+                port_options.append(current_port)
+            port_index = (
+                port_options.index(current_port)
+                if current_port in port_options
+                else 0
+            )
+            selected_port = st.selectbox(
+                "Serial port",
+                port_options,
+                index=port_index,
+                help="Choose a specific USB port or auto-detect the radio.",
+            )
+            channel_name = st.text_input(
+                "Mesh channel name",
+                value=settings["channel_name"],
+                help="Must match a channel configured on the Meshtastic radio.",
+            )
+            sync_delay = st.number_input(
+                "Sync packet delay (seconds)",
+                min_value=0.0,
+                max_value=30.0,
+                step=0.5,
+                value=float(settings["sync_packet_delay"]),
+                help="Pause between bulk sync packets so LoRa can finish each send.",
+            )
+            if st.button("Apply & reconnect", use_container_width=True, key="apply_settings"):
+                try:
+                    new_settings = save_settings(
+                        {
+                            "meshtastic_port": None
+                            if selected_port == "Auto-detect"
+                            else selected_port,
+                            "channel_name": channel_name,
+                            "sync_packet_delay": sync_delay,
+                        }
+                    )
+                    st.session_state.app_settings = new_settings
+                    st.session_state.client.close()
+                    st.session_state.client = _create_client(new_settings)
+                    st.session_state.receiver = MeshReceiver(st.session_state.client)
+                    st.toast("Settings saved — reconnecting radio")
+                    st.rerun()
+                except SettingsError as exc:
+                    st.error(str(exc))
+
+        if st.button("Reconnect radio", use_container_width=True):
+            st.session_state.client.close()
+            st.session_state.client = _create_client(st.session_state.app_settings)
+            st.session_state.receiver = MeshReceiver(st.session_state.client)
+            st.rerun()
 
         st.divider()
         st.subheader("Mock testing")
@@ -139,12 +207,6 @@ def _render_sidebar() -> None:
         if st.button("Inject mock packet", use_container_width=True):
             st.session_state.client.mock_inject(mock_msg)
             st.toast(f"Injected: {mock_msg}")
-
-        if st.button("Reconnect radio", use_container_width=True):
-            st.session_state.client.close()
-            st.session_state.client = MeshtasticClient()
-            st.session_state.receiver = MeshReceiver(st.session_state.client)
-            st.rerun()
 
         st.divider()
         st.subheader("Mesh sync")
@@ -307,7 +369,8 @@ def _render_transmitter_mode() -> None:
 
         mode_label = "Full sync" if sync_mode == "full" else "Delta sync"
         total_packets = len(packets)
-        est_seconds = max(0, (total_packets - 1) * SYNC_PACKET_DELAY)
+        packet_delay = _sync_packet_delay()
+        est_seconds = max(0, (total_packets - 1) * packet_delay)
 
         with st.status(
             f"{mode_label}: sending {len(sync_rows)} house(s) in {total_packets} packet(s)…",
@@ -316,7 +379,7 @@ def _render_transmitter_mode() -> None:
             if total_packets > 1:
                 st.caption(
                     f"Estimated time: ~{est_seconds:.0f}s "
-                    f"({SYNC_PACKET_DELAY}s pause between packets for LoRa airtime)"
+                    f"({packet_delay:g}s pause between packets for LoRa airtime)"
                 )
 
             progress = st.progress(0.0, text="Starting mesh sync…")
@@ -346,6 +409,7 @@ def _render_transmitter_mode() -> None:
 
             success, errors = st.session_state.client.send_many(
                 packets,
+                delay_seconds=packet_delay,
                 on_progress=_on_progress,
                 on_waiting=_on_waiting if total_packets > 1 else None,
             )

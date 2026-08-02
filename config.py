@@ -8,6 +8,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 CSV_PATH = DATA_DIR / "neighborhood_status.csv"
 LAST_SYNC_PATH = DATA_DIR / "last_mesh_sync.csv"
 ADDRESSES_PATH = DATA_DIR / "house_addresses.csv"
+SETTINGS_PATH = DATA_DIR / "app_settings.json"
 
 # CSV schema
 CSV_FIELDS = ("house_id", "status_code", "timestamp")
