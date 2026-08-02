@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 from datetime import datetime
@@ -15,6 +16,7 @@ from config import (
     STATUS_COLORS,
     STATUS_LABELS,
     STATUS_URGENCY,
+    MESH_MAX_PAYLOAD_BYTES,
 )
 from address_store import (
     AddressStoreError,
@@ -34,7 +36,12 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
-from meshtastic_client import MeshtasticClient, list_serial_ports
+from meshtastic_client import (
+    MeshtasticClient,
+    _ensure_global_pubsub,
+    _set_active_client,
+    list_serial_ports,
+)
 from packet_codec import encode_bulk_sync_chunks
 from print_board import build_printable_html
 from precinct_store import (
@@ -63,6 +70,14 @@ from sync_state import (
     format_status_change,
     has_last_sync,
     save_last_sync,
+)
+from text_messages import (
+    TextMessageError,
+    drain_pending,
+    format_message_text,
+    record_received,
+    record_sent,
+    validate_message,
 )
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -137,6 +152,35 @@ def _configure_receiver() -> None:
     )
 
 
+def _restart_receiver_if_needed() -> None:
+    receiver: MeshReceiver = st.session_state.receiver
+    if st.session_state.mode != "Receiver":
+        if receiver.stats.running:
+            receiver.stop()
+        return
+    if not receiver.stats.running:
+        receiver.start()
+
+
+def _reconnect_radio(app_settings: dict | None = None) -> None:
+    if app_settings is not None:
+        st.session_state.app_settings = app_settings
+
+    receiver: MeshReceiver = st.session_state.receiver
+    if receiver.stats.running:
+        receiver.stop()
+
+    st.session_state.client.close()
+    st.session_state.client = _create_client(st.session_state.app_settings)
+    st.session_state.receiver = MeshReceiver(st.session_state.client)
+    _set_active_client(st.session_state.client)
+    _ensure_global_pubsub()
+    _register_text_message_listener()
+    _configure_receiver()
+    st.session_state.client.reconnect()
+    _restart_receiver_if_needed()
+
+
 def _read_district_rows(district_id: str) -> list[dict]:
     rows: list[dict] = []
     for precinct in list_precincts(district_id):
@@ -194,6 +238,55 @@ def _change_labels(pending: list[dict]) -> dict[str, str]:
     }
 
 
+def _on_mesh_text_message(text: str, from_id: str | None = None) -> None:
+    record_received(text, from_id=from_id)
+
+
+def _register_text_message_listener() -> None:
+    st.session_state.client.register_receive_callback(_on_mesh_text_message)
+    st.session_state.text_message_listener_client = id(st.session_state.client)
+
+
+def _ensure_text_message_listener() -> None:
+    client = st.session_state.client
+    if st.session_state.get("text_message_listener_client") != id(client):
+        _register_text_message_listener()
+
+
+def _sync_text_messages() -> list[dict]:
+    if "text_messages" not in st.session_state:
+        st.session_state.text_messages = []
+
+    client = st.session_state.client
+    new_received_alert: dict | None = None
+    for message in drain_pending():
+        sender_name = client.node_display_name(message.from_id)
+        item = {
+            "at": message.at,
+            "direction": message.direction,
+            "text": message.text,
+            "from_id": message.from_id,
+            "sender_name": sender_name,
+        }
+        st.session_state.text_messages.insert(0, item)
+        if message.direction == "received" and new_received_alert is None:
+            new_received_alert = item
+
+    if new_received_alert is not None:
+        st.session_state.text_message_alert = new_received_alert
+
+    for item in st.session_state.text_messages:
+        if item.get("from_id") and not item.get("sender_name"):
+            item["sender_name"] = client.node_display_name(item["from_id"])
+        elif item.get("from_id") and item["sender_name"] == item["from_id"]:
+            resolved = client.node_display_name(item["from_id"])
+            if resolved and resolved != item["from_id"]:
+                item["sender_name"] = resolved
+
+    st.session_state.text_messages = st.session_state.text_messages[:50]
+    return st.session_state.text_messages
+
+
 def _init_session_state() -> None:
     migrate_legacy_data()
     init_organization()
@@ -202,6 +295,13 @@ def _init_session_state() -> None:
     init_precinct_data(st.session_state.app_settings["active_precinct_id"])
     if "client" not in st.session_state:
         st.session_state.client = _create_client(st.session_state.app_settings)
+    _set_active_client(st.session_state.client)
+    _ensure_global_pubsub()
+    if "text_messages" not in st.session_state:
+        st.session_state.text_messages = []
+    if "text_message_alert" not in st.session_state:
+        st.session_state.text_message_alert = None
+    _ensure_text_message_listener()
     if "receiver" not in st.session_state:
         st.session_state.receiver = MeshReceiver(st.session_state.client)
     _configure_receiver()
@@ -242,6 +342,19 @@ st.markdown(
             font-size: 1.1rem;
         }
         div[data-testid="stMetricValue"] { font-size: 1.6rem; }
+        @keyframes text-msg-flash {
+            0%, 100% { background-color: #FEF3C7; border-color: #F59E0B; }
+            50% { background-color: #FDE68A; border-color: #D97706; }
+        }
+        .text-message-alert {
+            animation: text-msg-flash 1s ease-in-out infinite;
+            border: 3px solid #F59E0B;
+            border-radius: 0.5rem;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1rem;
+            font-size: 1.25rem;
+            line-height: 1.5;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -571,36 +684,44 @@ def _render_sidebar() -> None:
                             "sync_packet_delay": sync_delay,
                         }
                     )
-                    st.session_state.app_settings = new_settings
-                    st.session_state.client.close()
-                    st.session_state.client = _create_client(new_settings)
-                    st.session_state.receiver = MeshReceiver(st.session_state.client)
-                    _configure_receiver()
+                    _reconnect_radio(new_settings)
                     st.toast("Settings saved — reconnecting radio")
                     st.rerun()
                 except SettingsError as exc:
                     st.error(str(exc))
 
         if st.button("Reconnect radio", use_container_width=True):
-            st.session_state.client.close()
-            st.session_state.client = _create_client(st.session_state.app_settings)
-            st.session_state.receiver = MeshReceiver(st.session_state.client)
-            _configure_receiver()
+            _reconnect_radio()
+            st.toast("Reconnecting radio")
             st.rerun()
 
         st.divider()
-        st.subheader("Mock testing")
-        st.caption(
-            "Simulate an incoming mesh packet locally (does not transmit over the radio). "
-            "Use in **Receiver** mode to update the board."
+        show_mock_testing = st.checkbox(
+            "Show mock testing tools",
+            value=bool(st.session_state.app_settings.get("show_mock_testing", True)),
+            help="Hide the packet injection panel when you do not need it.",
+            key="show_mock_testing_toggle",
         )
-        mock_msg = st.text_input(
-            "Simulate incoming packet",
-            value=f"NS:{_active_precinct_id()}:H001:R",
-        )
-        if st.button("Inject mock packet", use_container_width=True):
-            st.session_state.client.mock_inject(mock_msg)
-            st.toast(f"Injected: {mock_msg}")
+        if show_mock_testing != bool(st.session_state.app_settings.get("show_mock_testing", True)):
+            _save_context_settings(show_mock_testing=show_mock_testing)
+            st.rerun()
+
+        if show_mock_testing:
+            st.subheader("Mock testing")
+            st.caption(
+                "Simulate an incoming mesh packet locally (does not transmit over the radio). "
+                "Use in **Receiver** mode to update the board."
+            )
+            mock_msg = st.text_input(
+                "Simulate incoming packet",
+                value=f"NS:{_active_precinct_id()}:H001:R",
+            )
+            if st.button("Inject mock packet", use_container_width=True):
+                st.session_state.client.mock_inject(mock_msg)
+                st.toast(f"Injected: {mock_msg}")
+                st.rerun()
+
+        _render_text_messages()
 
         st.divider()
         st.subheader("Mesh sync")
@@ -1046,6 +1167,74 @@ def _format_change_time(ts: str) -> str:
         return ts or "—"
 
 
+@st.fragment(run_every=2)
+def _render_text_message_alert() -> None:
+    alert = st.session_state.get("text_message_alert")
+    if not alert:
+        return
+
+    sender = alert.get("sender_name") or alert.get("from_id") or "Unknown"
+    body = format_message_text(sender, alert["text"])
+    time_label = _format_change_time(alert["at"])
+
+    st.markdown(
+        f"""
+        <div class="text-message-alert">
+            <strong>📩 New text message · {html.escape(time_label)}</strong><br>
+            {html.escape(body)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("Dismiss alert", key="dismiss_text_alert", use_container_width=True):
+        st.session_state.text_message_alert = None
+        st.rerun()
+
+
+@st.fragment(run_every=2)
+def _render_text_messages() -> None:
+    channel = st.session_state.app_settings.get("channel_name", "charcStatus")
+    with st.expander("Text messages", expanded=False):
+        st.caption(
+            f"Send free-form text on mesh channel **{channel}**. "
+            "Status packets (`NS:...`) are handled separately."
+        )
+        message = st.text_area(
+            "Message",
+            key="mesh_text_message",
+            height=100,
+            placeholder="Need extra water at staging point.",
+        )
+        byte_count = len(message.encode("utf-8"))
+        st.caption(f"{byte_count} / {MESH_MAX_PAYLOAD_BYTES} bytes")
+
+        if st.button("Send message", use_container_width=True, key="send_text_message_btn"):
+            try:
+                cleaned = validate_message(message)
+                ok, detail = st.session_state.client.send_text(cleaned)
+                if ok:
+                    record_sent(cleaned, from_id=st.session_state.client.local_node_id())
+                    st.toast("Message sent")
+                    st.rerun()
+                else:
+                    st.error(detail)
+            except TextMessageError as exc:
+                st.error(str(exc))
+
+        messages = _sync_text_messages()
+        if messages:
+            st.markdown("**Recent messages**")
+            for item in messages[:12]:
+                prefix = "Sent" if item["direction"] == "sent" else "Received"
+                sender = item.get("sender_name") or item.get("from_id")
+                body = format_message_text(sender, item["text"])
+                st.markdown(
+                    f"**{prefix} · {_format_change_time(item['at'])}**  \n{body}"
+                )
+        else:
+            st.caption("No text messages yet.")
+
+
 def _render_receiver_mode() -> None:
     district_id = _active_district_id()
     districts = {d.id: d.name for d in list_districts()}
@@ -1056,8 +1245,7 @@ def _render_receiver_mode() -> None:
     st.caption("Listening for mesh updates and refreshing the status board.")
 
     receiver: MeshReceiver = st.session_state.receiver
-    if not receiver.stats.running:
-        receiver.start()
+    _restart_receiver_if_needed()
 
     stats = receiver.stats
     rows = _read_district_rows(district_id)
@@ -1145,8 +1333,11 @@ def _render_receiver_mode() -> None:
 
 def main() -> None:
     _init_session_state()
+    _ensure_text_message_listener()
     _render_connection_banner()
+    _render_text_message_alert()
     _render_sidebar()
+    _sync_text_messages()
 
     if st.session_state.mode == "Transmitter":
         if st.session_state.receiver.stats.running:

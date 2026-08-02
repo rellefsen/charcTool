@@ -23,6 +23,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "sync_packet_delay": SYNC_PACKET_DELAY,
     "active_precinct_id": DEFAULT_PRECINCT_ID,
     "active_district_id": DEFAULT_DISTRICT_ID,
+    "show_mock_testing": True,
 }
 
 
@@ -54,6 +55,7 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
     district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()
     settings["active_precinct_id"] = precinct or DEFAULT_PRECINCT_ID
     settings["active_district_id"] = district or DEFAULT_DISTRICT_ID
+    settings["show_mock_testing"] = bool(raw.get("show_mock_testing", settings["show_mock_testing"]))
 
     validate_settings(settings)
     return settings

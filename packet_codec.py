@@ -169,6 +169,11 @@ def decode_updates(text: str) -> list[MeshUpdate]:
     return [single] if single else []
 
 
+def is_status_packet(text: str) -> bool:
+    """Return True when a mesh message is a neighborhood status packet."""
+    return bool(decode_updates(text))
+
+
 def _parse_bulk_parts(precinct_id: str | None, payload: str) -> list[MeshUpdate]:
     updates: list[MeshUpdate] = []
     for part in payload.split(","):
