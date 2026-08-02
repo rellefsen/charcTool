@@ -39,15 +39,22 @@ from packet_codec import encode_bulk_sync_chunks
 from print_board import build_printable_html
 from precinct_store import (
     PrecinctPaths,
+    PrecinctStoreError,
+    add_district,
+    add_precinct,
     get_district_for_precinct,
     get_precinct,
     init_organization,
     init_precinct_data,
     list_districts,
     list_precincts,
+    make_precinct_id,
     migrate_legacy_data,
     paths_for_precinct,
     precinct_ids_for_district,
+    remove_district,
+    remove_precinct,
+    suggest_next_precinct_suffix,
 )
 from receiver import MeshReceiver
 from settings_store import SettingsError, load_settings, save_settings
@@ -87,6 +94,38 @@ def _active_paths() -> PrecinctPaths:
 def _save_context_settings(**updates: object) -> None:
     settings = {**st.session_state.app_settings, **updates}
     st.session_state.app_settings = save_settings(settings)
+
+
+def _switch_context_after_precinct_removed(removed_id: str) -> None:
+    if _active_precinct_id() != removed_id:
+        _configure_receiver()
+        return
+
+    remaining = list_precincts()
+    fallback = remaining[0]
+    _save_context_settings(
+        active_precinct_id=fallback.id,
+        active_district_id=fallback.district_id,
+    )
+    st.session_state.pending_edits.clear()
+    init_precinct_data(fallback.id)
+    _configure_receiver()
+
+
+def _switch_context_after_district_removed(removed_id: str) -> None:
+    if _active_district_id() != removed_id:
+        return
+
+    fallback_district = list_districts()[0]
+    fallback_precinct = list_precincts(fallback_district.id)[0]
+    _save_context_settings(
+        active_district_id=fallback_district.id,
+        active_precinct_id=fallback_precinct.id,
+    )
+    st.session_state.pending_edits.clear()
+    st.session_state.pop("receiver_baseline", None)
+    init_precinct_data(fallback_precinct.id)
+    _configure_receiver()
 
 
 def _configure_receiver() -> None:
@@ -348,6 +387,136 @@ def _render_sidebar() -> None:
                 f"Listening for **{len(watched)}** precinct(s): "
                 + ", ".join(p.id for p in watched)
             )
+
+        with st.expander("Add district", expanded=False):
+            new_district_id = st.text_input(
+                "District ID",
+                key="add_district_id",
+                help="2–8 letters or numbers, e.g. SOUTH",
+            )
+            new_district_name = st.text_input(
+                "District name",
+                key="add_district_name",
+                placeholder="South District",
+            )
+            if st.button("Add district", use_container_width=True, key="add_district_btn"):
+                try:
+                    district = add_district(new_district_id, new_district_name)
+                    st.toast(f"Added district {district.id}")
+                    st.rerun()
+                except PrecinctStoreError as exc:
+                    st.error(str(exc))
+
+        districts = list_districts()
+        with st.expander("Add precinct", expanded=False):
+            if not districts:
+                st.caption("Add a district first.")
+            else:
+                district_options = {d.id: f"{d.id} — {d.name}" for d in districts}
+                add_precinct_district = st.selectbox(
+                    "District",
+                    list(district_options),
+                    format_func=lambda did: district_options[did],
+                    key="add_precinct_district",
+                )
+                suggested_suffix = suggest_next_precinct_suffix(add_precinct_district)
+                precinct_suffix = st.text_input(
+                    "Precinct suffix",
+                    value=suggested_suffix,
+                    key="add_precinct_suffix",
+                    help="2–4 letters or numbers appended to the district ID.",
+                )
+                new_precinct_name = st.text_input(
+                    "Precinct name",
+                    key="add_precinct_name",
+                    placeholder=f"Precinct {precinct_suffix or suggested_suffix}",
+                )
+                try:
+                    preview_id = make_precinct_id(
+                        add_precinct_district,
+                        precinct_suffix or suggested_suffix,
+                    )
+                    st.caption(f"Precinct ID: **{preview_id}**")
+                except PrecinctStoreError as exc:
+                    st.caption(str(exc))
+                if st.button("Add precinct", use_container_width=True, key="add_precinct_btn"):
+                    try:
+                        precinct = add_precinct(
+                            add_precinct_district,
+                            precinct_suffix,
+                            new_precinct_name,
+                        )
+                        init_precinct_data(precinct.id)
+                        if st.session_state.mode == "Transmitter":
+                            _save_context_settings(
+                                active_precinct_id=precinct.id,
+                                active_district_id=precinct.district_id,
+                            )
+                            st.session_state.pending_edits.clear()
+                        _configure_receiver()
+                        st.toast(f"Added precinct {precinct.id}")
+                        st.rerun()
+                    except PrecinctStoreError as exc:
+                        st.error(str(exc))
+
+        precincts = list_precincts()
+        with st.expander("Remove precinct", expanded=False):
+            if len(precincts) <= 1:
+                st.caption("At least one precinct is required.")
+            else:
+                precinct_options = {p.id: f"{p.id} — {p.name}" for p in precincts}
+                remove_precinct_id = st.selectbox(
+                    "Precinct to remove",
+                    list(precinct_options),
+                    format_func=lambda pid: precinct_options[pid],
+                    key="remove_precinct_id",
+                )
+                st.warning(
+                    f"Permanently removes **{remove_precinct_id}** and deletes its local CSV files."
+                )
+                if st.button("Remove precinct", use_container_width=True, key="remove_precinct_btn"):
+                    try:
+                        remove_precinct(remove_precinct_id)
+                        _switch_context_after_precinct_removed(remove_precinct_id)
+                        st.toast(f"Removed {remove_precinct_id}")
+                        st.rerun()
+                    except PrecinctStoreError as exc:
+                        st.error(str(exc))
+
+        with st.expander("Remove district", expanded=False):
+            if len(districts) <= 1:
+                st.caption("At least one district is required.")
+            else:
+                district_options = {d.id: f"{d.id} — {d.name}" for d in districts}
+                remove_district_id = st.selectbox(
+                    "District to remove",
+                    list(district_options),
+                    format_func=lambda did: district_options[did],
+                    key="remove_district_id",
+                )
+                child_precincts = list_precincts(remove_district_id)
+                if child_precincts:
+                    st.warning(
+                        f"Remove all precincts in **{remove_district_id}** first: "
+                        + ", ".join(p.id for p in child_precincts)
+                    )
+                else:
+                    st.warning(
+                        f"Permanently removes district **{remove_district_id}**."
+                    )
+                if st.button(
+                    "Remove district",
+                    use_container_width=True,
+                    key="remove_district_btn",
+                    disabled=bool(child_precincts),
+                ):
+                    try:
+                        remove_district(remove_district_id)
+                        _switch_context_after_district_removed(remove_district_id)
+                        st.toast(f"Removed district {remove_district_id}")
+                        st.rerun()
+                    except PrecinctStoreError as exc:
+                        st.error(str(exc))
 
         st.divider()
         st.subheader("Radio")

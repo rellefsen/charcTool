@@ -188,6 +188,20 @@ def get_district_for_precinct(precinct_id: str) -> str:
     return precinct.district_id
 
 
+def add_district(district_id: str, name: str) -> District:
+    district_id = normalize_id(district_id)
+    validate_district_id(district_id)
+    org = load_organization()
+    existing = {normalize_id(d["id"]) for d in org.get("districts", [])}
+    if district_id in existing:
+        raise PrecinctStoreError(f"District {district_id} already exists.")
+
+    district_name = name.strip() or district_id
+    org["districts"].append({"id": district_id, "name": district_name})
+    save_organization(org)
+    return District(id=district_id, name=district_name)
+
+
 def add_precinct(district_id: str, suffix: str, name: str) -> Precinct:
     district_id = normalize_id(district_id)
     validate_district_id(district_id)
@@ -211,6 +225,44 @@ def add_precinct(district_id: str, suffix: str, name: str) -> Precinct:
     save_organization(org)
     precinct_dir(precinct_id).mkdir(parents=True, exist_ok=True)
     return Precinct(id=precinct_id, district_id=district_id, name=name.strip() or precinct_id)
+
+
+def remove_precinct(precinct_id: str) -> None:
+    precinct_id = normalize_id(precinct_id)
+    validate_precinct_id(precinct_id)
+    org = load_organization()
+    precincts = org.get("precincts", [])
+    if len(precincts) <= 1:
+        raise PrecinctStoreError("Cannot remove the last precinct.")
+
+    org["precincts"] = [
+        row for row in precincts if normalize_id(row["id"]) != precinct_id
+    ]
+    save_organization(org)
+
+    data_dir = precinct_dir(precinct_id)
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+
+
+def remove_district(district_id: str) -> None:
+    district_id = normalize_id(district_id)
+    validate_district_id(district_id)
+    org = load_organization()
+    districts = org.get("districts", [])
+    if len(districts) <= 1:
+        raise PrecinctStoreError("Cannot remove the last district.")
+    if list_precincts(district_id):
+        raise PrecinctStoreError(
+            f"Remove all precincts in {district_id} before deleting the district."
+        )
+    if district_id not in {normalize_id(d["id"]) for d in districts}:
+        raise PrecinctStoreError(f"Unknown district: {district_id}")
+
+    org["districts"] = [
+        row for row in districts if normalize_id(row["id"]) != district_id
+    ]
+    save_organization(org)
 
 
 def suggest_next_precinct_suffix(district_id: str) -> str:
