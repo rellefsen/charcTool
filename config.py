@@ -53,5 +53,8 @@ DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 11)]
 # Meshtastic serial (None = auto-detect)
 MESHTASTIC_PORT: str | None = None
 
+# Meshtastic mesh channel for neighborhood status traffic
+MESHTASTIC_CHANNEL_NAME = "charcStatus"
+
 # Receiver poll interval (seconds)
 RECEIVER_POLL_INTERVAL = 2.0

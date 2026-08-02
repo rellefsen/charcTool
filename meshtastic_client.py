@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-from config import MESHTASTIC_PORT
+from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class ConnectionInfo:
     mock_mode: bool
     port: str | None
     message: str
+    channel_name: str | None = None
+    channel_index: int | None = None
 
 
 def _discover_meshtastic_port(explicit: str | None = None) -> str | None:
@@ -51,14 +53,30 @@ def _discover_meshtastic_port(explicit: str | None = None) -> str | None:
     return None
 
 
+def _resolve_channel_index(iface: object, channel_name: str) -> int | None:
+    """Look up a named channel index on the connected radio."""
+    try:
+        node = iface.getNode("^local")
+        channel = node.getChannelByName(channel_name)
+        if channel is None:
+            logger.warning("Channel %r not found on radio", channel_name)
+            return None
+        return int(channel.index)
+    except Exception:
+        logger.exception("Failed to resolve channel %r", channel_name)
+        return None
+
+
 @dataclass
 class MeshtasticClient:
     """Thin wrapper around the Meshtastic serial API."""
 
     dev_path: str | None = MESHTASTIC_PORT
+    channel_name: str = MESHTASTIC_CHANNEL_NAME
     _interface: object | None = field(default=None, init=False, repr=False)
     _mock_mode: bool = field(default=False, init=False)
     _connected_port: str | None = field(default=None, init=False)
+    _channel_index: int | None = field(default=None, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _receive_callbacks: list[ReceiveCallback] = field(default_factory=list, init=False)
     _mock_inbox: deque[str] = field(default_factory=deque, init=False)
@@ -97,17 +115,32 @@ class MeshtasticClient:
                 self._interface = iface
                 self._connected_port = port
                 self._mock_mode = False
+                self._channel_index = _resolve_channel_index(iface, self.channel_name)
 
                 if not self._pubsub_registered:
                     pub.subscribe(self._on_receive, "meshtastic.receive.text")
                     self._pubsub_registered = True
 
-                logger.info("Connected to Meshtastic on %s", port)
+                if self._channel_index is None:
+                    message = (
+                        f"Connected to radio on {port}, but channel "
+                        f"'{self.channel_name}' was not found. "
+                        "Add it in the Meshtastic app, then click Reconnect."
+                    )
+                else:
+                    message = (
+                        f"Connected to radio on {port}, "
+                        f"channel '{self.channel_name}' (index {self._channel_index})"
+                    )
+
+                logger.info(message)
                 return ConnectionInfo(
                     connected=True,
                     mock_mode=False,
                     port=port,
-                    message=f"Connected to radio on {port}",
+                    message=message,
+                    channel_name=self.channel_name,
+                    channel_index=self._channel_index,
                 )
 
             except Exception as exc:
@@ -122,11 +155,14 @@ class MeshtasticClient:
         self._interface = None
         self._mock_mode = True
         self._connected_port = None
+        self._channel_index = None
         return ConnectionInfo(
             connected=False,
             mock_mode=True,
             port=None,
             message=message,
+            channel_name=self.channel_name,
+            channel_index=None,
         )
 
     def connection_info(self) -> ConnectionInfo:
@@ -135,13 +171,28 @@ class MeshtasticClient:
                 connected=False,
                 mock_mode=True,
                 port=None,
-                message="Mock mode — no radio connected",
+                message=f"Mock mode — no radio connected (channel: {self.channel_name})",
+                channel_name=self.channel_name,
+                channel_index=None,
+            )
+        if self._channel_index is None and self._interface is not None:
+            message = (
+                f"Connected to radio on {self._connected_port}, but channel "
+                f"'{self.channel_name}' was not found"
+            )
+        else:
+            message = (
+                f"Connected to radio on {self._connected_port}, "
+                f"channel '{self.channel_name}'"
+                + (f" (index {self._channel_index})" if self._channel_index is not None else "")
             )
         return ConnectionInfo(
             connected=self._interface is not None,
             mock_mode=False,
             port=self._connected_port,
-            message=f"Connected to radio on {self._connected_port}",
+            message=message,
+            channel_name=self.channel_name,
+            channel_index=self._channel_index,
         )
 
     def send_text(self, text: str) -> tuple[bool, str]:
@@ -149,14 +200,23 @@ class MeshtasticClient:
         with self._lock:
             info = self.connect()
             if info.mock_mode:
-                logger.info("[MOCK TX] %s", text)
-                return True, f"Mock transmit: {text}"
+                logger.info("[MOCK TX %s] %s", self.channel_name, text)
+                return True, f"Mock transmit on {self.channel_name}: {text}"
+
+            if self._channel_index is None:
+                msg = f"Cannot send — channel '{self.channel_name}' not found on radio"
+                logger.error(msg)
+                return False, msg
 
             try:
                 assert self._interface is not None
-                self._interface.sendText(text, wantAck=False)
-                logger.info("[TX] %s", text)
-                return True, f"Sent: {text}"
+                self._interface.sendText(
+                    text,
+                    wantAck=False,
+                    channelIndex=self._channel_index,
+                )
+                logger.info("[TX ch=%s] %s", self.channel_name, text)
+                return True, f"Sent on {self.channel_name}: {text}"
             except Exception as exc:
                 logger.error("Send failed: %s", exc)
                 self._reset_connection()
@@ -199,6 +259,17 @@ class MeshtasticClient:
         return messages
 
     def _on_receive(self, packet: dict, interface: object | None = None) -> None:
+        if self._channel_index is not None:
+            rx_channel = packet.get("channel", 0)
+            if rx_channel != self._channel_index:
+                logger.debug(
+                    "Ignoring packet on channel %s (want %s / %r)",
+                    rx_channel,
+                    self._channel_index,
+                    self.channel_name,
+                )
+                return
+
         text = self._extract_text(packet)
         if not text:
             return
@@ -233,6 +304,7 @@ class MeshtasticClient:
             pass
         self._interface = None
         self._connected_port = None
+        self._channel_index = None
 
     def close(self) -> None:
         with self._lock:
