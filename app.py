@@ -13,6 +13,7 @@ from config import (
     STATUS_CODES,
     STATUS_COLORS,
     STATUS_LABELS,
+    SYNC_PACKET_DELAY,
 )
 from csv_store import ensure_default_houses, init_csv, read_all, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
@@ -241,26 +242,76 @@ def _render_transmitter_mode() -> None:
             st.error(str(exc))
             st.stop()
 
-        success, errors = st.session_state.client.send_many(packets)
         mode_label = "Full sync" if sync_mode == "full" else "Delta sync"
+        total_packets = len(packets)
+        est_seconds = max(0, (total_packets - 1) * SYNC_PACKET_DELAY)
+
+        with st.status(
+            f"{mode_label}: sending {len(sync_rows)} house(s) in {total_packets} packet(s)…",
+            expanded=True,
+        ) as sync_status:
+            if total_packets > 1:
+                st.caption(
+                    f"Estimated time: ~{est_seconds:.0f}s "
+                    f"({SYNC_PACKET_DELAY}s pause between packets for LoRa airtime)"
+                )
+
+            progress = st.progress(0.0, text="Starting mesh sync…")
+            detail = st.empty()
+
+            def _on_progress(current: int, total: int) -> None:
+                fraction = current / total
+                progress.progress(
+                    fraction,
+                    text=f"Sending packet {current} of {total}…",
+                )
+                detail.markdown(
+                    f"**Packet {current}/{total}** — `{packets[current - 1][:80]}"
+                    + ("…" if len(packets[current - 1]) > 80 else "")
+                    + "`"
+                )
+
+            def _on_waiting(current: int, total: int, delay: float) -> None:
+                progress.progress(
+                    current / total,
+                    text=f"Waiting {delay:.0f}s for radio airtime…",
+                )
+                detail.markdown(
+                    f"Packet **{current}/{total}** sent. "
+                    f"Pausing **{delay:.0f}s** before packet **{current + 1}**."
+                )
+
+            success, errors = st.session_state.client.send_many(
+                packets,
+                on_progress=_on_progress,
+                on_waiting=_on_waiting if total_packets > 1 else None,
+            )
+
+            if errors:
+                sync_status.update(label="Sync finished with errors", state="error")
+                progress.progress(1.0, text="Sync finished with errors")
+            else:
+                sync_status.update(label="Sync complete", state="complete")
+                progress.progress(1.0, text="All packets sent")
+
         st.session_state.last_sync_log = [
-            f"{mode_label}: {len(sync_rows)} house(s) in {len(packets)} packet(s)",
+            f"{mode_label}: {len(sync_rows)} house(s) in {total_packets} packet(s)",
             *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(packets)],
         ] + errors
 
         if errors:
-            st.error(f"Sent {success}/{len(packets)} packets — some failed.")
-        elif len(packets) == 1:
+            st.error(f"Sent {success}/{total_packets} packets — some failed.")
+        elif total_packets == 1:
             st.success(
                 f"{mode_label}: sent {len(sync_rows)} house status(es) in one mesh packet!"
             )
         else:
             st.success(
                 f"{mode_label}: sent {len(sync_rows)} house status(es) "
-                f"across {len(packets)} mesh packets!"
+                f"across {total_packets} mesh packets!"
             )
 
-        if success == len(packets):
+        if success == total_packets:
             save_last_sync(rows)
             st.session_state.force_full_sync = False
 

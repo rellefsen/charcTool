@@ -19,6 +19,8 @@ from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT, SYNC_PACKET_DELAY
 logger = logging.getLogger(__name__)
 
 ReceiveCallback = Callable[[str], None]
+ProgressCallback = Callable[[int, int], None]
+WaitingCallback = Callable[[int, int, float], None]
 
 
 @dataclass
@@ -227,18 +229,29 @@ class MeshtasticClient:
         self,
         messages: list[str],
         delay_seconds: float = SYNC_PACKET_DELAY,
+        on_progress: ProgressCallback | None = None,
+        on_waiting: WaitingCallback | None = None,
     ) -> tuple[int, list[str]]:
         """Send multiple packets with a delay between each for LoRa airtime."""
         errors: list[str] = []
         success = 0
+        total = len(messages)
+
         for index, msg in enumerate(messages):
+            if on_progress:
+                on_progress(index + 1, total)
+
             ok, detail = self.send_text(msg)
             if ok:
                 success += 1
             else:
                 errors.append(detail)
-            if delay_seconds > 0 and index < len(messages) - 1:
+
+            if delay_seconds > 0 and index < total - 1:
+                if on_waiting:
+                    on_waiting(index + 1, total, delay_seconds)
                 time.sleep(delay_seconds)
+
         return success, errors
 
     def register_receive_callback(self, callback: ReceiveCallback) -> None:
