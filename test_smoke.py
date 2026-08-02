@@ -126,6 +126,42 @@ def test_packet_codec() -> None:
     print("packet_codec: OK")
 
 
+def test_settings_store(tmp_path) -> None:
+    import config
+    import settings_store
+
+    settings_path = tmp_path / "app_settings.json"
+    orig = config.SETTINGS_PATH
+    config.SETTINGS_PATH = settings_path
+
+    try:
+        defaults = settings_store.load_settings()
+        assert defaults["channel_name"] == "charcStatus"
+        assert defaults["sync_packet_delay"] == 2.0
+
+        saved = settings_store.save_settings(
+            {
+                "meshtastic_port": "/dev/ttyUSB0",
+                "channel_name": "blockA",
+                "sync_packet_delay": 3.5,
+            }
+        )
+        assert saved["meshtastic_port"] == "/dev/ttyUSB0"
+        assert saved["channel_name"] == "blockA"
+        assert saved["sync_packet_delay"] == 3.5
+
+        reloaded = settings_store.load_settings()
+        assert reloaded == saved
+
+        try:
+            settings_store.save_settings({"channel_name": "", "sync_packet_delay": 2.0})
+            assert False, "expected SettingsError"
+        except settings_store.SettingsError:
+            pass
+    finally:
+        config.SETTINGS_PATH = orig
+
+    print("settings_store: OK")
 def test_house_management(tmp_path) -> None:
     import csv
     from pathlib import Path
@@ -246,6 +282,7 @@ if __name__ == "__main__":
     test_addresses_local_only()
     test_urgency_sort()
     with tempfile.TemporaryDirectory() as tmp:
+        test_settings_store(Path(tmp))
         test_house_management(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")
