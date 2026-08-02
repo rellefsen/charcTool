@@ -42,6 +42,7 @@ from receiver import MeshReceiver
 from settings_store import SettingsError, load_settings, save_settings
 from sync_state import (
     compute_sync_rows,
+    format_status_change,
     has_last_sync,
     save_last_sync,
 )
@@ -131,6 +132,16 @@ def _compute_district_changes(
             c["house_id"],
         ),
     )
+
+
+def _change_labels(pending: list[dict]) -> dict[str, str]:
+    return {
+        f"{change['precinct_id']}:{change['house_id'].upper()}": format_status_change(
+            change.get("previous_status"),
+            change["current_status"],
+        )
+        for change in pending
+    }
 
 
 def _init_session_state() -> None:
@@ -491,7 +502,7 @@ def _attach_district_addresses(rows: list[dict]) -> list[dict]:
 def _render_readonly_board(
     rows: list[dict],
     paths: PrecinctPaths | None = None,
-    pending_keys: set[str] | None = None,
+    change_labels: dict[str, str] | None = None,
     show_precinct: bool = False,
 ) -> None:
     """Read-only neighborhood board for Receiver mode (no edits, all houses)."""
@@ -501,7 +512,7 @@ def _render_readonly_board(
         rows = attach_addresses(rows, path=paths.addresses)
     else:
         rows = attach_addresses(rows)
-    pending_keys = pending_keys or set()
+    change_labels = change_labels or {}
 
     if show_precinct:
         header = st.columns([1.2, 1.2, 2.2, 2, 1.5, 1.2])
@@ -510,15 +521,15 @@ def _render_readonly_board(
         header[2].markdown("**Address**")
         header[3].markdown("**Status**")
         header[4].markdown("**Updated**")
-        header[5].markdown("**Changed**")
-        col_weights = [1.2, 1.2, 2.2, 2, 1.5, 1.2]
+        header[5].markdown("**Was → Now**")
+        col_weights = [1.2, 1.2, 2.2, 2, 1.5, 1.5]
     else:
         header = st.columns([1.5, 2.5, 2, 1.5, 1.5])
         header[0].markdown("**House**")
         header[1].markdown("**Address**")
         header[2].markdown("**Status**")
         header[3].markdown("**Updated**")
-        header[4].markdown("**Changed**")
+        header[4].markdown("**Was → Now**")
         col_weights = [1.5, 2.5, 2, 1.5, 1.5]
 
     for row in rows:
@@ -530,7 +541,7 @@ def _render_readonly_board(
         change_key = (
             f"{precinct_id}:{house_id.upper()}" if show_precinct else house_id.upper()
         )
-        changed = change_key in pending_keys
+        change_label = change_labels.get(change_key, "")
 
         cols = st.columns(col_weights)
         offset = 0
@@ -548,7 +559,10 @@ def _render_readonly_board(
         except ValueError:
             display_ts = ts
         cols[offset + 3].caption(display_ts)
-        cols[offset + 4].markdown("**Yes**" if changed else "—")
+        if change_label:
+            cols[offset + 4].markdown(f"**{change_label}**")
+        else:
+            cols[offset + 4].markdown("—")
 
 
 def _apply_pending_edits(paths: PrecinctPaths) -> None:
@@ -756,15 +770,19 @@ def _render_receiver_mode() -> None:
 
     st.divider()
 
-    pending_keys = {
-        f"{change['precinct_id']}:{change['house_id'].upper()}" for change in pending
-    }
+    change_labels = _change_labels(pending)
     if pending:
         st.subheader(f"Changes since watch started ({len(pending)})")
         st.caption(
-            "Updated houses are marked **Changed** in the board below. "
+            "Status transitions are shown in the **Was → Now** column below. "
             "Addresses are local only and never sent over the mesh."
         )
+        for change in pending:
+            label = format_status_change(
+                change.get("previous_status"),
+                change["current_status"],
+            )
+            st.markdown(f"**{change['precinct_id']}/{change['house_id']}** — {label}")
     else:
         st.success("No pending changes — board matches your watch baseline.")
 
@@ -780,7 +798,7 @@ def _render_receiver_mode() -> None:
     st.divider()
     st.subheader(f"District board ({len(rows)} houses)")
     st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
-    _render_readonly_board(rows, pending_keys=pending_keys, show_precinct=True)
+    _render_readonly_board(rows, change_labels=change_labels, show_precinct=True)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
     c1, c2, c3 = st.columns(3)

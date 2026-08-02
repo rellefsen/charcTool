@@ -120,6 +120,12 @@ def compute_changes_since_baseline(
     return sorted(changes, key=lambda c: c.house_id)
 
 
+def format_status_change(previous_status: str | None, current_status: str) -> str:
+    """Format a receiver change for display, e.g. GREEN → RED."""
+    before = previous_status if previous_status else "NEW"
+    return f"{before} → {current_status}"
+
+
 def sort_changes_by_urgency(changes: list[HouseChange]) -> list[HouseChange]:
     """Sort pending receiver changes by current status urgency."""
     return sorted(
