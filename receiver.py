@@ -75,20 +75,20 @@ class MeshReceiver:
         logger.info("Mesh receiver stopped")
 
     def _run_loop(self) -> None:
-        self.client.connect()
         while not self._stop_event.is_set():
             try:
                 info = self.client.connection_info()
                 if info.mock_mode:
                     for msg in self.client.poll_mock_inbox():
-                        self._handle_message(msg)
+                        self.client.dispatch_message(msg)
             except Exception as exc:
                 self.stats.last_error = str(exc)
                 logger.exception("Receiver loop error")
 
             self._stop_event.wait(self.poll_interval)
 
-    def _handle_message(self, text: str) -> None:
+    def _handle_message(self, text: str, from_id: str | None = None) -> None:
+        del from_id
         self.stats.packets_received += 1
         self.stats.last_packet = text
 

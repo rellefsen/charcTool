@@ -160,6 +160,7 @@ def test_settings_store(tmp_path) -> None:
         assert defaults["channel_name"] == "charcStatus"
         assert defaults["active_precinct_id"] == "CHARC01"
         assert defaults["active_district_id"] == "CHARC"
+        assert defaults["show_mock_testing"] is True
 
         saved = settings_store.save_settings(
             {
@@ -168,9 +169,11 @@ def test_settings_store(tmp_path) -> None:
                 "sync_packet_delay": 3.5,
                 "active_precinct_id": "CHARC02",
                 "active_district_id": "CHARC",
+                "show_mock_testing": False,
             }
         )
         assert saved["active_precinct_id"] == "CHARC02"
+        assert saved["show_mock_testing"] is False
         reloaded = settings_store.load_settings()
         assert reloaded == saved
     finally:
@@ -381,6 +384,159 @@ def test_printable_board_html() -> None:
     print("printable_board: OK")
 
 
+def test_text_messages() -> None:
+    from packet_codec import is_status_packet
+    from text_messages import (
+        TextMessageError,
+        clear_messages,
+        drain_pending,
+        format_message_text,
+        record_received,
+        record_sent,
+        validate_message,
+    )
+
+    clear_messages()
+    assert is_status_packet("NS:CHARC01:H001:R") is True
+    assert is_status_packet("Need help at staging") is False
+
+    assert validate_message("  hello mesh  ") == "hello mesh"
+    try:
+        validate_message("   ")
+        assert False, "expected empty message error"
+    except TextMessageError:
+        pass
+
+    record_sent("Staging needs more water", from_id="!LOCAL01")
+    record_received("NS:CHARC01:H001:R")
+    received = record_received("Copy that", from_id="!RADIO42")
+    assert received is not None
+    assert received.text == "Copy that"
+    assert received.from_id == "!RADIO42"
+
+    pending = drain_pending()
+    assert pending[0].text == "Copy that"
+    assert pending[0].from_id == "!RADIO42"
+    assert pending[1].from_id == "!LOCAL01"
+    assert format_message_text("North Relay", "Copy that") == "North Relay: Copy that"
+    assert drain_pending() == []
+
+    print("text_messages: OK")
+
+
+def test_node_display_name() -> None:
+    client = MeshtasticClient()
+    assert client.node_display_name("LOCAL") == "Local Radio"
+    assert client.node_display_name("!MOCK") == "Mock Radio"
+
+    client._mock_mode = False
+    client._interface = type(
+        "Iface",
+        (),
+        {
+            "nodesByNum": {
+                0x28B5465C: {
+                    "user": {
+                        "id": "!28b5465c",
+                        "longName": "North Relay",
+                        "shortName": "NR01",
+                    }
+                }
+            },
+            "getMyUser": lambda self: None,
+            "getLongName": lambda self: None,
+            "getShortName": lambda self: None,
+            "myInfo": None,
+        },
+    )()
+    assert client.node_display_name("!28b5465c") == "North Relay"
+    assert client.node_display_name("!deadbeef") == "!deadbeef"
+
+    print("node_display_name: OK")
+
+
+def test_text_message_dispatch() -> None:
+    from text_messages import clear_messages, drain_pending, record_received
+
+    clear_messages()
+    client = MeshtasticClient()
+    client.register_receive_callback(
+        lambda text, from_id=None: record_received(text, from_id=from_id)
+    )
+    client.dispatch_message("Meet at the church steps", "!MOCK01")
+    client.dispatch_message("NS:CHARC01:H001:R", "!MOCK01")
+
+    pending = drain_pending()
+    assert len(pending) == 1
+    assert pending[0].text == "Meet at the church steps"
+    assert pending[0].from_id == "!MOCK01"
+
+    clear_messages()
+    client._mock_mode = True
+    client.send_text("Mock reply")
+    pending = drain_pending()
+    assert len(pending) == 1
+    assert pending[0].text == "Mock reply"
+    assert pending[0].from_id == "LOCAL"
+
+    print("text_message_dispatch: OK")
+
+
+def test_global_pubsub_routing() -> None:
+    from pubsub import pub
+
+    from meshtastic_client import MeshtasticClient, _ensure_global_pubsub, _set_active_client
+    from text_messages import clear_messages, drain_pending, record_received
+
+    clear_messages()
+    _ensure_global_pubsub()
+    client = MeshtasticClient()
+    client._channel_index = 0
+    client.register_receive_callback(
+        lambda text, from_id=None: record_received(text, from_id=from_id)
+    )
+    _set_active_client(client)
+
+    pub.sendMessage(
+        "meshtastic.receive.text",
+        packet={
+            "channel": 0,
+            "fromId": "!abc123",
+            "decoded": {"text": "Hello mesh"},
+        },
+    )
+
+    pending = drain_pending()
+    assert len(pending) == 1
+    assert pending[0].text == "Hello mesh"
+    assert pending[0].from_id == "!abc123"
+
+    clear_messages()
+    pub.sendMessage(
+        "meshtastic.receive.text",
+        packet={
+            "channel": 1,
+            "fromId": "!abc123",
+            "decoded": {"text": "Wrong channel"},
+        },
+    )
+    assert len(drain_pending()) == 0
+
+    client2 = MeshtasticClient()
+    client2._channel_index = 0
+    client2.register_receive_callback(
+        lambda text, from_id=None: record_received(text, from_id=from_id)
+    )
+    _set_active_client(client2)
+    pub.sendMessage(
+        "meshtastic.receive.text",
+        packet={"channel": 0, "decoded": {"text": "After reconnect"}},
+    )
+    assert drain_pending()[0].text == "After reconnect"
+
+    print("global_pubsub_routing: OK")
+
+
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
@@ -412,5 +568,9 @@ if __name__ == "__main__":
         test_house_management(Path(tmp))
         test_bulk_address_import(Path(tmp))
     test_printable_board_html()
+    test_text_messages()
+    test_node_display_name()
+    test_text_message_dispatch()
+    test_global_pubsub_routing()
     test_mock_fallback()
     print("All smoke tests passed.")

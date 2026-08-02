@@ -18,9 +18,34 @@ from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT, SYNC_PACKET_DELAY
 
 logger = logging.getLogger(__name__)
 
-ReceiveCallback = Callable[[str], None]
+ReceiveCallback = Callable[[str, str | None], None]
 ProgressCallback = Callable[[int, int], None]
 WaitingCallback = Callable[[int, int, float], None]
+
+_active_client: "MeshtasticClient | None" = None
+_global_pubsub_registered = False
+
+
+def _set_active_client(client: "MeshtasticClient | None") -> None:
+    global _active_client
+    _active_client = client
+
+
+def _global_pubsub_handler(packet: dict, interface: object | None = None) -> None:
+    client = _active_client
+    if client is None:
+        return
+    client._process_incoming_packet(packet)
+
+
+def _ensure_global_pubsub() -> None:
+    global _global_pubsub_registered
+    if _global_pubsub_registered:
+        return
+    from pubsub import pub  # type: ignore[import-untyped]
+
+    pub.subscribe(_global_pubsub_handler, "meshtastic.receive.text")
+    _global_pubsub_registered = True
 
 
 @dataclass
@@ -83,7 +108,86 @@ class MeshtasticClient:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _receive_callbacks: list[ReceiveCallback] = field(default_factory=list, init=False)
     _mock_inbox: deque[str] = field(default_factory=deque, init=False)
-    _pubsub_registered: bool = field(default=False, init=False)
+
+    def local_node_id(self) -> str | None:
+        """Return this radio's mesh node ID, if known."""
+        with self._lock:
+            if self._mock_mode:
+                return "LOCAL"
+            if self._interface is None:
+                return None
+            try:
+                user = self._interface.getMyUser()
+                if user and user.get("id"):
+                    return str(user["id"])
+                if self._interface.myInfo is not None:
+                    return self._interface._nodeNumToId(
+                        self._interface.myInfo.my_node_num,
+                        False,
+                    )
+            except Exception:
+                logger.exception("Failed to read local node id")
+            return None
+
+    def local_node_name(self) -> str | None:
+        """Return this radio's friendly name, if known."""
+        with self._lock:
+            if self._mock_mode:
+                return "Local Radio"
+            if self._interface is None:
+                return None
+            try:
+                name = self._interface.getLongName()
+                if name:
+                    return str(name)
+                name = self._interface.getShortName()
+                if name:
+                    return str(name)
+            except Exception:
+                logger.exception("Failed to read local node name")
+            return self.local_node_id()
+
+    @staticmethod
+    def _user_display_name(user: dict | None) -> str | None:
+        if not user:
+            return None
+        return str(user.get("longName") or user.get("shortName") or user.get("id") or "").strip() or None
+
+    def node_display_name(self, node_id: str | None) -> str | None:
+        """Resolve a mesh node ID to a friendly radio name."""
+        if not node_id:
+            return None
+        if node_id == "LOCAL":
+            return "Local Radio"
+        if node_id == "!MOCK":
+            return "Mock Radio"
+
+        with self._lock:
+            if self._interface is None or self._mock_mode:
+                return node_id
+
+            try:
+                iface = self._interface
+                nodes = iface.nodesByNum or {}
+
+                for node in nodes.values():
+                    user = node.get("user") or {}
+                    if user.get("id") == node_id:
+                        name = self._user_display_name(user)
+                        if name:
+                            return name
+
+                if node_id.startswith("!"):
+                    num = int(node_id[-8:], 16)
+                    node = nodes.get(num)
+                    if node:
+                        name = self._user_display_name(node.get("user"))
+                        if name:
+                            return name
+            except Exception:
+                logger.exception("Failed to resolve node name for %s", node_id)
+
+            return node_id
 
     def connect(self) -> ConnectionInfo:
         """Attempt serial connection; fall back to mock mode on failure."""
@@ -120,9 +224,8 @@ class MeshtasticClient:
                 self._mock_mode = False
                 self._channel_index = _resolve_channel_index(iface, self.channel_name)
 
-                if not self._pubsub_registered:
-                    pub.subscribe(self._on_receive, "meshtastic.receive.text")
-                    self._pubsub_registered = True
+                _set_active_client(self)
+                _ensure_global_pubsub()
 
                 if self._channel_index is None:
                     message = (
@@ -159,6 +262,7 @@ class MeshtasticClient:
         self._mock_mode = True
         self._connected_port = None
         self._channel_index = None
+        _set_active_client(self)
         return ConnectionInfo(
             connected=False,
             mock_mode=True,
@@ -204,6 +308,7 @@ class MeshtasticClient:
             info = self.connect()
             if info.mock_mode:
                 logger.info("[MOCK TX %s] %s", self.channel_name, text)
+                self.dispatch_message(text, self.local_node_id())
                 return True, f"Mock transmit on {self.channel_name}: {text}"
 
             if self._channel_index is None:
@@ -224,6 +329,14 @@ class MeshtasticClient:
                 logger.error("Send failed: %s", exc)
                 self._reset_connection()
                 return False, f"Send failed: {exc}"
+
+    def reconnect(self) -> ConnectionInfo:
+        """Close any existing session and attempt a fresh radio connection."""
+        with self._lock:
+            self._reset_connection()
+            self._mock_mode = False
+        _set_active_client(self)
+        return self.connect()
 
     def send_many(
         self,
@@ -262,14 +375,17 @@ class MeshtasticClient:
         if callback in self._receive_callbacks:
             self._receive_callbacks.remove(callback)
 
-    def mock_inject(self, text: str) -> None:
-        """Simulate an incoming mesh message (for testing without hardware)."""
-        self._mock_inbox.append(text)
+    def dispatch_message(self, text: str, from_id: str | None = None) -> None:
+        """Deliver a mesh text payload to all receive callbacks."""
         for cb in list(self._receive_callbacks):
             try:
-                cb(text)
+                cb(text, from_id)
             except Exception:
                 logger.exception("Receive callback error")
+
+    def mock_inject(self, text: str, from_id: str | None = "!MOCK") -> None:
+        """Simulate an incoming mesh message (for testing without hardware)."""
+        self.dispatch_message(text, from_id)
 
     def poll_mock_inbox(self) -> list[str]:
         """Drain simulated incoming messages (used by receiver thread in mock mode)."""
@@ -278,10 +394,14 @@ class MeshtasticClient:
             messages.append(self._mock_inbox.popleft())
         return messages
 
-    def _on_receive(self, packet: dict, interface: object | None = None) -> None:
+    def _process_incoming_packet(self, packet: dict) -> None:
         if self._channel_index is not None:
             rx_channel = packet.get("channel", 0)
-            if rx_channel != self._channel_index:
+            try:
+                channel_match = int(rx_channel) == int(self._channel_index)
+            except (TypeError, ValueError):
+                channel_match = rx_channel == self._channel_index
+            if not channel_match:
                 logger.debug(
                     "Ignoring packet on channel %s (want %s / %r)",
                     rx_channel,
@@ -293,25 +413,47 @@ class MeshtasticClient:
         text = self._extract_text(packet)
         if not text:
             return
-        for cb in list(self._receive_callbacks):
-            try:
-                cb(text)
-            except Exception:
-                logger.exception("Receive callback error")
+        from_id = packet.get("fromId")
+        if from_id is not None:
+            from_id = str(from_id)
+        self.dispatch_message(text, from_id)
 
     @staticmethod
     def _extract_text(packet: dict) -> str | None:
         try:
             decoded = packet.get("decoded") or {}
-            data = decoded.get("data") or {}
-            text = data.get("text")
+            text = decoded.get("text")
             if text:
                 return str(text).strip()
-            payload = data.get("payload")
+
+            payload = decoded.get("payload")
             if payload:
                 if isinstance(payload, (bytes, bytearray)):
-                    return payload.decode("utf-8", errors="replace").strip()
-                return str(payload).strip()
+                    decoded_text = payload.decode("utf-8", errors="replace").strip()
+                    if decoded_text:
+                        return decoded_text
+                elif isinstance(payload, str):
+                    payload = payload.strip()
+                    if payload:
+                        return payload
+
+            data = decoded.get("data") or {}
+            if isinstance(data, dict):
+                text = data.get("text")
+                if text:
+                    return str(text).strip()
+                nested_payload = data.get("payload")
+                if nested_payload:
+                    if isinstance(nested_payload, (bytes, bytearray)):
+                        return nested_payload.decode("utf-8", errors="replace").strip()
+                    return str(nested_payload).strip()
+            elif data:
+                if isinstance(data, (bytes, bytearray)):
+                    return data.decode("utf-8", errors="replace").strip()
+                return str(data).strip()
+
+            if packet.get("text"):
+                return str(packet["text"]).strip()
         except Exception:
             logger.exception("Failed to parse incoming packet")
         return None
@@ -328,8 +470,11 @@ class MeshtasticClient:
 
     def close(self) -> None:
         with self._lock:
+            if _active_client is self:
+                _set_active_client(None)
             self._reset_connection()
             self._mock_mode = False
+            self._receive_callbacks.clear()
 
 
 def list_serial_ports() -> list[str]:
