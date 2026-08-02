@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import CSV_FIELDS, CSV_PATH, DEFAULT_HOUSES, STATUS_GREEN
+from config import CSV_FIELDS, CSV_PATH, DEFAULT_HOUSES, STATUS_GREEN, STATUS_URGENCY
 
 _lock = threading.Lock()
 
@@ -86,6 +86,17 @@ def read_all(path: Path | None = None) -> list[dict[str, str]]:
             rows = list(csv.DictReader(fh))
 
     return sorted(rows, key=lambda r: r["house_id"])
+
+
+def sort_rows_by_urgency(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Sort houses RED first, then YELLOW, then GREEN; ties by house_id."""
+    return sorted(
+        rows,
+        key=lambda r: (
+            STATUS_URGENCY.get(r["status_code"], 99),
+            r["house_id"],
+        ),
+    )
 
 
 def update_status(

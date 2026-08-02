@@ -45,6 +45,13 @@ STATUS_BG = {
     STATUS_GREEN: "#DCFCE7",
 }
 
+# Lower number = higher urgency (shown first in the UI)
+STATUS_URGENCY = {
+    STATUS_RED: 0,
+    STATUS_YELLOW: 1,
+    STATUS_GREEN: 2,
+}
+
 # Mesh packet prefix — identifies neighborhood-status messages
 PACKET_PREFIX = "NS"
 
