@@ -84,6 +84,8 @@ def _render_connection_banner() -> None:
     info = st.session_state.client.connect()
     if info.mock_mode:
         st.warning(f"📡 {info.message}")
+    elif info.channel_index is None:
+        st.error(f"📡 {info.message}")
     else:
         st.success(f"📡 {info.message}")
 
@@ -101,6 +103,10 @@ def _render_sidebar() -> None:
 
         st.divider()
         st.subheader("Radio")
+        info = st.session_state.client.connection_info()
+        st.caption(f"Mesh channel: **{info.channel_name}**")
+        if info.channel_index is not None:
+            st.caption(f"Channel index: {info.channel_index}")
         ports = list_serial_ports()
         if ports:
             st.caption("Detected serial ports:")

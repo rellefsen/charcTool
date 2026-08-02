@@ -15,13 +15,15 @@ def test_packet_codec() -> None:
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
-    assert info.mock_mode is True
-    assert info.connected is False
-    ok, msg = client.send_text("NS:H002:Y")
-    assert ok is True
-    assert "Mock transmit" in msg
+    if info.mock_mode:
+        ok, msg = client.send_text("NS:H002:Y")
+        assert ok is True
+        assert "Mock transmit" in msg
+        print("mock_fallback: OK")
+    else:
+        assert info.connected is True
+        print(f"mock_fallback: skipped (radio connected on {info.port})")
     client.close()
-    print("mock_fallback: OK")
 
 
 if __name__ == "__main__":
