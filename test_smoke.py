@@ -126,6 +126,101 @@ def test_packet_codec() -> None:
     print("packet_codec: OK")
 
 
+def test_house_management(tmp_path) -> None:
+    import csv
+    from pathlib import Path
+
+    import address_store
+    import config
+    import csv_store
+    import house_store
+    import sync_state
+
+    status_path = tmp_path / "status.csv"
+    addr_path = tmp_path / "addresses.csv"
+    sync_path = tmp_path / "last_sync.csv"
+
+    orig = {
+        "config_csv": config.CSV_PATH,
+        "config_addr": config.ADDRESSES_PATH,
+        "config_sync": config.LAST_SYNC_PATH,
+        "csv": csv_store.CSV_PATH,
+        "addr": address_store.ADDRESSES_PATH,
+        "sync": sync_state.LAST_SYNC_PATH,
+    }
+    config.CSV_PATH = status_path
+    config.ADDRESSES_PATH = addr_path
+    config.LAST_SYNC_PATH = sync_path
+    csv_store.CSV_PATH = status_path
+    address_store.ADDRESSES_PATH = addr_path
+    sync_state.LAST_SYNC_PATH = sync_path
+
+    try:
+        from address_store import read_address_map
+        from csv_store import read_all, update_status
+        from sync_state import read_last_sync, save_last_sync
+
+        with status_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=config.CSV_FIELDS)
+            writer.writeheader()
+            writer.writerow(
+                {"house_id": "H001", "status_code": "RED", "timestamp": "t1"}
+            )
+            writer.writerow(
+                {"house_id": "H002", "status_code": "GREEN", "timestamp": "t2"}
+            )
+
+        with addr_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=config.ADDRESS_FIELDS)
+            writer.writeheader()
+            writer.writerow({"house_id": "H001", "address": "101 Oak St"})
+            writer.writerow({"house_id": "H002", "address": "102 Oak St"})
+
+        save_last_sync(read_all(path=status_path), path=sync_path)
+
+        row = house_store.add_house("H003", "303 Pine St")
+        assert row["house_id"] == "H003"
+        assert row["status_code"] == "GREEN"
+        assert read_address_map(path=addr_path)["H003"] == "303 Pine St"
+        assert house_store.suggest_next_house_id() == "H004"
+
+        save_last_sync(read_all(path=status_path), path=sync_path)
+
+        house_store.rename_house("H003", "H030")
+        ids = [r["house_id"] for r in read_all(path=status_path)]
+        assert "H030" in ids
+        assert "H003" not in ids
+        assert read_address_map(path=addr_path)["H030"] == "303 Pine St"
+        assert read_last_sync(path=sync_path)["H030"] == "GREEN"
+        assert "H003" not in read_last_sync(path=sync_path)
+
+        house_store.remove_house("H030")
+        ids = [r["house_id"] for r in read_all(path=status_path)]
+        assert "H030" not in ids
+        assert "H030" not in read_address_map(path=addr_path)
+        assert "H030" not in read_last_sync(path=sync_path)
+
+        # Simulate app startup — must not resurrect a deleted house.
+        from address_store import init_addresses as addr_init
+        from csv_store import init_csv as status_init
+
+        house_store.remove_house("H002")
+        status_init(status_path)
+        addr_init(addr_path)
+        ids = [r["house_id"] for r in read_all(path=status_path)]
+        assert "H002" not in ids
+        assert "H002" not in read_address_map(path=addr_path)
+    finally:
+        config.CSV_PATH = orig["config_csv"]
+        config.ADDRESSES_PATH = orig["config_addr"]
+        config.LAST_SYNC_PATH = orig["config_sync"]
+        csv_store.CSV_PATH = orig["csv"]
+        address_store.ADDRESSES_PATH = orig["addr"]
+        sync_state.LAST_SYNC_PATH = orig["sync"]
+
+    print("house_management: OK")
+
+
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
@@ -150,5 +245,7 @@ if __name__ == "__main__":
     test_receiver_changes()
     test_addresses_local_only()
     test_urgency_sort()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_house_management(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")
