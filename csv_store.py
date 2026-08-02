@@ -44,6 +44,38 @@ def init_csv(path: Path | None = None) -> Path:
     return target
 
 
+def ensure_default_houses(path: Path | None = None) -> int:
+    """Add any missing DEFAULT_HOUSES rows to an existing CSV. Returns count added."""
+    target = path or CSV_PATH
+    init_csv(target)
+    ts = _now_iso()
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        existing = {row["house_id"].upper() for row in rows}
+        added = 0
+        for house_id in DEFAULT_HOUSES:
+            if house_id not in existing:
+                rows.append(
+                    {
+                        "house_id": house_id,
+                        "status_code": STATUS_GREEN,
+                        "timestamp": ts,
+                    }
+                )
+                added += 1
+
+        if added:
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerows(sorted(rows, key=lambda r: r["house_id"]))
+
+    return added
+
+
 def read_all(path: Path | None = None) -> list[dict[str, str]]:
     """Return all rows sorted by house_id."""
     target = path or CSV_PATH

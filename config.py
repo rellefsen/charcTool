@@ -6,6 +6,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 CSV_PATH = DATA_DIR / "neighborhood_status.csv"
+LAST_SYNC_PATH = DATA_DIR / "last_mesh_sync.csv"
 
 # CSV schema
 CSV_FIELDS = ("house_id", "status_code", "timestamp")
@@ -47,8 +48,8 @@ STATUS_BG = {
 # Mesh packet prefix — identifies neighborhood-status messages
 PACKET_PREFIX = "NS"
 
-# Default sample houses for first-time setup
-DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 11)]
+# Default sample houses for first-time setup (60 houses exercises multi-packet bulk sync)
+DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 61)]
 
 # Meshtastic serial (None = auto-detect)
 MESHTASTIC_PORT: str | None = None

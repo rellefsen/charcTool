@@ -14,10 +14,11 @@ from config import (
     STATUS_COLORS,
     STATUS_LABELS,
 )
-from csv_store import init_csv, read_all, update_status
+from csv_store import ensure_default_houses, init_csv, read_all, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
+from sync_state import compute_sync_rows, has_last_sync, save_last_sync
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,6 +60,9 @@ st.markdown(
 
 def _init_session_state() -> None:
     init_csv()
+    added = ensure_default_houses()
+    if added:
+        logger.info("Added %s default houses to CSV", added)
     if "client" not in st.session_state:
         st.session_state.client = MeshtasticClient()
     if "receiver" not in st.session_state:
@@ -128,6 +132,17 @@ def _render_sidebar() -> None:
             st.session_state.receiver = MeshReceiver(st.session_state.client)
             st.rerun()
 
+        st.divider()
+        st.subheader("Mesh sync")
+        if has_last_sync():
+            st.caption("Next sync sends **changed houses only**.")
+        else:
+            st.caption("First sync will send **all houses**.")
+        st.session_state.force_full_sync = st.checkbox(
+            "Force full sync (all houses)",
+            value=st.session_state.get("force_full_sync", False),
+        )
+
 
 def _render_status_table(rows: list[dict]) -> None:
     st.subheader("Neighborhood Status Board")
@@ -177,6 +192,10 @@ def _apply_pending_edits() -> None:
 def _render_transmitter_mode() -> None:
     st.title("📤 Transmitter Mode")
     st.caption("Update house statuses and sync to the mesh network.")
+    if has_last_sync():
+        st.caption("Only changed houses are sent after the first successful sync.")
+    else:
+        st.caption("First sync transmits the full neighborhood board.")
 
     rows = read_all()
     _render_status_table(rows)
@@ -200,29 +219,42 @@ def _render_transmitter_mode() -> None:
     if sync_clicked:
         _apply_pending_edits()
         rows = read_all()
+        force_full = st.session_state.get("force_full_sync", False)
+        sync_rows, sync_mode = compute_sync_rows(rows, force_full=force_full)
+
+        if sync_mode == "none":
+            st.info("Nothing to sync — no house statuses have changed since last mesh sync.")
+            st.rerun()
+
         try:
-            packets = encode_bulk_sync_chunks(
-                [(r["house_id"], r["status_code"]) for r in rows]
-            )
+            packets = encode_bulk_sync_chunks(sync_rows)
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
 
         success, errors = st.session_state.client.send_many(packets)
+        mode_label = "Full sync" if sync_mode == "full" else "Delta sync"
         st.session_state.last_sync_log = [
-            f"Bulk sync: {len(rows)} houses in {len(packets)} packet(s)",
+            f"{mode_label}: {len(sync_rows)} house(s) in {len(packets)} packet(s)",
             *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(packets)],
         ] + errors
 
         if errors:
             st.error(f"Sent {success}/{len(packets)} packets — some failed.")
         elif len(packets) == 1:
-            st.success(f"Successfully synced {len(rows)} house statuses in one mesh packet!")
+            st.success(
+                f"{mode_label}: sent {len(sync_rows)} house status(es) in one mesh packet!"
+            )
         else:
             st.success(
-                f"Successfully synced {len(rows)} house statuses "
+                f"{mode_label}: sent {len(sync_rows)} house status(es) "
                 f"across {len(packets)} mesh packets!"
             )
+
+        if success == len(packets):
+            save_last_sync(rows)
+            st.session_state.force_full_sync = False
+
         st.rerun()
 
     if st.session_state.last_sync_log:
