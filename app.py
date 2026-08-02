@@ -14,8 +14,16 @@ from config import (
     STATUS_LABELS,
     SYNC_PACKET_DELAY,
 )
-from address_store import attach_addresses, ensure_default_addresses, read_address_map, update_address
-from csv_store import ensure_default_houses, init_csv, read_all, sort_rows_by_urgency, update_status
+from address_store import attach_addresses, init_addresses, read_address_map, update_address
+from csv_store import init_csv, read_all, sort_rows_by_urgency, update_status
+from house_store import (
+    HouseStoreError,
+    add_house,
+    normalize_house_id,
+    remove_house,
+    rename_house,
+    suggest_next_house_id,
+)
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
@@ -67,12 +75,7 @@ st.markdown(
 
 def _init_session_state() -> None:
     init_csv()
-    added = ensure_default_houses()
-    if added:
-        logger.info("Added %s default houses to CSV", added)
-    addr_added = ensure_default_addresses()
-    if addr_added:
-        logger.info("Added %s default addresses", addr_added)
+    init_addresses()
     if "client" not in st.session_state:
         st.session_state.client = MeshtasticClient()
     if "receiver" not in st.session_state:
@@ -158,21 +161,68 @@ def _render_sidebar() -> None:
         )
 
         st.divider()
-        st.subheader("House addresses")
-        st.caption("Local only — **never transmitted** over the mesh.")
+        st.subheader("House management")
+        st.caption("Local board only. Addresses are **never transmitted** over the mesh.")
         house_ids = [r["house_id"] for r in read_all()]
-        if house_ids:
-            edit_house = st.selectbox("Edit address for", house_ids, key="edit_address_house")
-            address_map = read_address_map()
-            new_address = st.text_input(
-                "Street address",
-                value=address_map.get(edit_house.upper(), ""),
-                key="edit_address_text",
+        st.caption(f"**{len(house_ids)}** houses on board")
+
+        with st.expander("Add house", expanded=False):
+            new_id = st.text_input(
+                "House ID",
+                value=suggest_next_house_id(),
+                key="add_house_id",
+                help="1–8 letters or numbers, e.g. H061",
             )
-            if st.button("Save address", use_container_width=True):
-                update_address(edit_house, new_address)
-                st.toast(f"Saved address for {edit_house}")
-                st.rerun()
+            new_addr = st.text_input(
+                "Street address (optional)",
+                key="add_house_addr",
+            )
+            if st.button("Add house", use_container_width=True, key="add_house_btn"):
+                try:
+                    add_house(new_id, new_addr or None)
+                    st.toast(f"Added {normalize_house_id(new_id)}")
+                    st.rerun()
+                except HouseStoreError as exc:
+                    st.error(str(exc))
+
+        if house_ids:
+            with st.expander("Edit address", expanded=False):
+                edit_house = st.selectbox("Edit address for", house_ids, key="edit_address_house")
+                address_map = read_address_map()
+                new_address = st.text_input(
+                    "Street address",
+                    value=address_map.get(edit_house.upper(), ""),
+                    key="edit_address_text",
+                )
+                if st.button("Save address", use_container_width=True):
+                    update_address(edit_house, new_address)
+                    st.toast(f"Saved address for {edit_house}")
+                    st.rerun()
+
+            with st.expander("Rename house", expanded=False):
+                rename_from = st.selectbox("House to rename", house_ids, key="rename_from")
+                rename_to = st.text_input("New house ID", value=rename_from, key="rename_to")
+                if st.button("Rename house", use_container_width=True, key="rename_btn"):
+                    try:
+                        new_name = normalize_house_id(rename_to)
+                        rename_house(rename_from, rename_to)
+                        st.toast(f"Renamed {rename_from} → {new_name}")
+                        st.rerun()
+                    except HouseStoreError as exc:
+                        st.error(str(exc))
+
+            with st.expander("Remove house", expanded=False):
+                remove_id = st.selectbox("House to remove", house_ids, key="remove_house")
+                st.warning(
+                    f"Permanently removes **{remove_id}** from status, address, and sync baseline."
+                )
+                if st.button("Remove house", use_container_width=True, key="remove_btn"):
+                    try:
+                        remove_house(remove_id)
+                        st.toast(f"Removed {remove_id}")
+                        st.rerun()
+                    except HouseStoreError as exc:
+                        st.error(str(exc))
 
 
 def _render_status_table(rows: list[dict]) -> None:

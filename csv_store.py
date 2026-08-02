@@ -138,6 +138,59 @@ def update_status(
     return updated_row
 
 
+def remove_house(house_id: str, path: Path | None = None) -> None:
+    """Remove a house from the status CSV."""
+    target = path or CSV_PATH
+    init_csv(target)
+    house_id = house_id.strip().upper()
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        new_rows = [r for r in rows if r["house_id"].upper() != house_id]
+        if len(new_rows) == len(rows):
+            raise ValueError(f"House {house_id} not found")
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            writer.writerows(sorted(new_rows, key=lambda r: r["house_id"]))
+
+
+def rename_house(old_id: str, new_id: str, path: Path | None = None) -> dict[str, str]:
+    """Rename a house id in the status CSV."""
+    target = path or CSV_PATH
+    init_csv(target)
+    old_id = old_id.strip().upper()
+    new_id = new_id.strip().upper()
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        if not any(r["house_id"].upper() == old_id for r in rows):
+            raise ValueError(f"House {old_id} not found")
+        if any(r["house_id"].upper() == new_id for r in rows):
+            raise ValueError(f"House {new_id} already exists")
+
+        updated_row: dict[str, str] | None = None
+        for row in rows:
+            if row["house_id"].upper() == old_id:
+                row["house_id"] = new_id
+                updated_row = row
+                break
+
+        assert updated_row is not None
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            writer.writerows(sorted(rows, key=lambda r: r["house_id"]))
+
+    return updated_row
+
+
 def apply_remote_update(
     house_id: str,
     status_code: str,
