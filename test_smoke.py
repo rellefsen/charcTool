@@ -316,6 +316,54 @@ def test_bulk_address_import(tmp_path) -> None:
     print("bulk_address_import: OK")
 
 
+def test_printable_board_html() -> None:
+    from print_board import build_printable_html, status_counts
+
+    rows = [
+        {
+            "house_id": "H001",
+            "status_code": "RED",
+            "timestamp": "2026-08-02T01:30:06Z",
+            "address": "142 Oak St",
+        },
+        {
+            "house_id": "H002",
+            "status_code": "GREEN",
+            "timestamp": "2026-08-02T01:30:06Z",
+            "address": "144 Oak St",
+        },
+    ]
+    html = build_printable_html(
+        rows,
+        title="Neighborhood Status Board",
+        subtitle="Precinct: CHARC01 — North Precinct 01",
+    )
+    assert "H001" in html
+    assert "142 Oak St" in html
+    assert "RED" in html
+    assert "<table" in html
+    assert status_counts(rows)["RED"] == 1
+
+    district_rows = [
+        {
+            **rows[0],
+            "precinct_id": "CHARC01",
+        }
+    ]
+    district_html = build_printable_html(
+        district_rows,
+        title="District Status Board",
+        subtitle="District: CHARC — North District",
+        show_precinct=True,
+        change_labels={"CHARC01:H001": "GREEN → RED"},
+    )
+    assert "CHARC01" in district_html
+    assert "GREEN → RED" in district_html
+    assert "Was → Now" in district_html
+
+    print("printable_board: OK")
+
+
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
@@ -346,5 +394,6 @@ if __name__ == "__main__":
         test_precinct_store(Path(tmp))
         test_house_management(Path(tmp))
         test_bulk_address_import(Path(tmp))
+    test_printable_board_html()
     test_mock_fallback()
     print("All smoke tests passed.")
