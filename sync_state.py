@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import CSV_FIELDS, CSV_PATH, LAST_SYNC_PATH
+from config import CSV_FIELDS, LAST_SYNC_PATH, STATUS_URGENCY
 
 _lock = threading.Lock()
 
@@ -118,6 +118,14 @@ def compute_changes_since_baseline(
             )
 
     return sorted(changes, key=lambda c: c.house_id)
+
+
+def sort_changes_by_urgency(changes: list[HouseChange]) -> list[HouseChange]:
+    """Sort pending receiver changes by current status urgency."""
+    return sorted(
+        changes,
+        key=lambda c: (STATUS_URGENCY.get(c.current_status, 99), c.house_id),
+    )
 
 
 def rows_to_baseline(rows: list[dict[str, str]]) -> dict[str, str]:

@@ -7,12 +7,14 @@ from packet_codec import (
     encode_bulk_sync_chunks,
     encode_status,
 )
+from csv_store import sort_rows_by_urgency
 from meshtastic_client import MeshtasticClient
 from sync_state import (
     compute_changes_since_baseline,
     compute_sync_rows,
     rows_to_baseline,
     save_last_sync,
+    sort_changes_by_urgency,
 )
 
 
@@ -55,6 +57,26 @@ def test_receiver_changes() -> None:
     assert changes[0].previous_status == "GREEN"
     assert changes[0].current_status == "YELLOW"
     print("receiver_changes: OK")
+
+
+def test_urgency_sort() -> None:
+    rows = [
+        {"house_id": "H003", "status_code": "GREEN", "timestamp": "t"},
+        {"house_id": "H001", "status_code": "RED", "timestamp": "t"},
+        {"house_id": "H002", "status_code": "YELLOW", "timestamp": "t"},
+    ]
+    assert [r["house_id"] for r in sort_rows_by_urgency(rows)] == ["H001", "H002", "H003"]
+
+    from sync_state import HouseChange
+
+    changes = sort_changes_by_urgency(
+        [
+            HouseChange("H010", "GREEN", "YELLOW", "t"),
+            HouseChange("H005", "GREEN", "RED", "t"),
+        ]
+    )
+    assert [c.house_id for c in changes] == ["H005", "H010"]
+    print("urgency_sort: OK")
 
 
 def test_packet_codec() -> None:
@@ -105,5 +127,6 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         test_sync_state_delta(Path(tmp))
     test_receiver_changes()
+    test_urgency_sort()
     test_mock_fallback()
     print("All smoke tests passed.")

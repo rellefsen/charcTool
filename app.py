@@ -15,7 +15,7 @@ from config import (
     STATUS_LABELS,
     SYNC_PACKET_DELAY,
 )
-from csv_store import ensure_default_houses, init_csv, read_all, update_status
+from csv_store import ensure_default_houses, init_csv, read_all, sort_rows_by_urgency, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
@@ -25,6 +25,7 @@ from sync_state import (
     has_last_sync,
     rows_to_baseline,
     save_last_sync,
+    sort_changes_by_urgency,
 )
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -202,12 +203,13 @@ def _apply_pending_edits() -> None:
 def _render_transmitter_mode() -> None:
     st.title("📤 Transmitter Mode")
     st.caption("Update house statuses and sync to the mesh network.")
+    st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
     if has_last_sync():
         st.caption("Only changed houses are sent after the first successful sync.")
     else:
         st.caption("First sync transmits the full neighborhood board.")
 
-    rows = read_all()
+    rows = sort_rows_by_urgency(read_all())
     _render_status_table(rows)
 
     st.divider()
@@ -349,9 +351,11 @@ def _render_receiver_mode() -> None:
         receiver.start()
 
     stats = receiver.stats
-    rows = read_all()
+    rows = sort_rows_by_urgency(read_all())
     baseline = st.session_state.receiver_baseline
-    pending = compute_changes_since_baseline(rows, baseline)
+    pending = sort_changes_by_urgency(
+        compute_changes_since_baseline(rows, baseline)
+    )
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Packets received", stats.packets_received)
@@ -413,6 +417,7 @@ def _render_receiver_mode() -> None:
 
     st.divider()
     st.subheader("Full neighborhood board")
+    st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
 
     show_changed_only = st.checkbox(
         "Show changed houses only",
