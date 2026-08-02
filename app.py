@@ -18,8 +18,13 @@ from csv_store import ensure_default_houses, init_csv, read_all, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
-from sync_state import compute_sync_rows, has_last_sync, save_last_sync
-
+from sync_state import (
+    compute_changes_since_baseline,
+    compute_sync_rows,
+    has_last_sync,
+    rows_to_baseline,
+    save_last_sync,
+)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -119,12 +124,16 @@ def _render_sidebar() -> None:
         else:
             st.caption("No serial ports detected.")
 
-        if st.session_state.client.connection_info().mock_mode:
-            st.subheader("Mock testing")
-            mock_msg = st.text_input("Simulate incoming packet", value="NS:H001:R")
-            if st.button("Inject mock packet", use_container_width=True):
-                st.session_state.client.mock_inject(mock_msg)
-                st.toast(f"Injected: {mock_msg}")
+        st.divider()
+        st.subheader("Mock testing")
+        st.caption(
+            "Simulate an incoming mesh packet locally (does not transmit over the radio). "
+            "Use in **Receiver** mode to update the board."
+        )
+        mock_msg = st.text_input("Simulate incoming packet", value="NS:H001:R")
+        if st.button("Inject mock packet", use_container_width=True):
+            st.session_state.client.mock_inject(mock_msg)
+            st.toast(f"Injected: {mock_msg}")
 
         if st.button("Reconnect radio", use_container_width=True):
             st.session_state.client.close()
@@ -263,50 +272,129 @@ def _render_transmitter_mode() -> None:
                 st.write(line)
 
 
+def _ensure_receiver_baseline() -> None:
+    if "receiver_baseline" not in st.session_state:
+        st.session_state.receiver_baseline = rows_to_baseline(read_all())
+
+
+def _reset_receiver_baseline() -> None:
+    st.session_state.receiver_baseline = rows_to_baseline(read_all())
+
+
+def _format_change_time(ts: str) -> str:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%m/%d %H:%M")
+    except ValueError:
+        return ts or "—"
+
+
 def _render_receiver_mode() -> None:
     st.title("📥 Receiver Mode")
     st.caption("Listening for mesh updates and refreshing the status board.")
+    _ensure_receiver_baseline()
 
     receiver: MeshReceiver = st.session_state.receiver
     if not receiver.stats.running:
         receiver.start()
 
     stats = receiver.stats
-    m1, m2, m3 = st.columns(3)
+    rows = read_all()
+    baseline = st.session_state.receiver_baseline
+    pending = compute_changes_since_baseline(rows, baseline)
+
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Packets received", stats.packets_received)
     m2.metric("Updates applied", stats.updates_applied)
-    m3.metric("Listener", "Active" if stats.running else "Stopped")
+    m3.metric("Pending changes", len(pending))
+    m4.metric("Listener", "Active" if stats.running else "Stopped")
 
     if stats.last_update:
-        st.info(f"Last update: **{stats.last_update}**")
+        st.info(f"Last mesh update: **{stats.last_update}**")
     if stats.last_packet and not stats.last_update:
         st.caption(f"Last packet (non-status): `{stats.last_packet}`")
     if stats.last_error:
         st.error(f"Error: {stats.last_error}")
 
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("✓ Mark all reviewed", use_container_width=True, type="primary"):
+            _reset_receiver_baseline()
+            st.toast("Baseline updated — pending changes cleared.")
+            st.rerun()
+    with col_b:
+        if st.button("↺ Reset watch baseline", use_container_width=True):
+            _reset_receiver_baseline()
+            st.toast("Watching for new changes from this board state.")
+            st.rerun()
+
     st.divider()
 
-    rows = read_all()
-    df = pd.DataFrame(rows)
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "house_id": st.column_config.TextColumn("House", width="small"),
-            "status_code": st.column_config.TextColumn("Status", width="medium"),
-            "timestamp": st.column_config.TextColumn("Updated", width="medium"),
-        },
+    if pending:
+        st.subheader(f"Changes since watch started ({len(pending)})")
+        st.caption(
+            "Houses that differ from when you opened Receiver mode or last marked reviewed."
+        )
+        change_rows = [
+            {
+                "House": c.house_id,
+                "Was": c.previous_status or "—",
+                "Now": c.current_status,
+                "Updated": _format_change_time(c.timestamp),
+            }
+            for c in pending
+        ]
+        st.dataframe(
+            pd.DataFrame(change_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.success("No pending changes — board matches your watch baseline.")
+
+    if stats.recent_activity:
+        with st.expander("Recent mesh activity", expanded=bool(pending)):
+            for item in list(stats.recent_activity)[:8]:
+                st.markdown(
+                    f"**{_format_change_time(item.at)}** — {item.summary}  \n"
+                    f"<span style='color:#6B7280;font-size:0.9rem'>`{item.packet}`</span>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+    st.subheader("Full neighborhood board")
+
+    show_changed_only = st.checkbox(
+        "Show changed houses only",
+        value=False,
+        disabled=len(pending) == 0,
     )
 
-    # Color summary counts
+    display_rows = rows
+    if show_changed_only and pending:
+        pending_ids = {c.house_id for c in pending}
+        display_rows = [r for r in rows if r["house_id"].upper() in pending_ids]
+
+    df = pd.DataFrame(display_rows)
+    if not df.empty:
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "house_id": st.column_config.TextColumn("House", width="small"),
+                "status_code": st.column_config.TextColumn("Status", width="medium"),
+                "timestamp": st.column_config.TextColumn("Updated", width="medium"),
+            },
+        )
+    else:
+        st.caption("No rows to display.")
+
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
     c1, c2, c3 = st.columns(3)
     c1.metric("🔴 RED", counts.get("RED", 0))
     c2.metric("🟡 YELLOW", counts.get("YELLOW", 0))
     c3.metric("🟢 GREEN", counts.get("GREEN", 0))
 
-    # Auto-refresh every 2 seconds while in receiver mode
     st.caption("Auto-refreshing every 2 seconds…")
     import time
 
@@ -322,8 +410,12 @@ def main() -> None:
     if st.session_state.mode == "Transmitter":
         if st.session_state.receiver.stats.running:
             st.session_state.receiver.stop()
+        st.session_state._last_mode = "Transmitter"
         _render_transmitter_mode()
     else:
+        if st.session_state.get("_last_mode") != "Receiver":
+            st.session_state.pop("receiver_baseline", None)
+        st.session_state._last_mode = "Receiver"
         _render_receiver_mode()
 
 

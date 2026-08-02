@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from config import RECEIVER_POLL_INTERVAL
 from csv_store import apply_remote_update
@@ -13,6 +15,15 @@ from meshtastic_client import MeshtasticClient
 from packet_codec import decode_updates
 
 logger = logging.getLogger(__name__)
+
+RECENT_ACTIVITY_LIMIT = 15
+
+
+@dataclass
+class RecentActivity:
+    at: str
+    packet: str
+    summary: str
 
 
 @dataclass
@@ -23,6 +34,8 @@ class ReceiverStats:
     last_packet: str = ""
     last_update: str = ""
     last_error: str = ""
+    last_activity_at: str = ""
+    recent_activity: deque = field(default_factory=lambda: deque(maxlen=RECENT_ACTIVITY_LIMIT))
 
 
 @dataclass
@@ -94,3 +107,12 @@ class MeshReceiver:
             self.stats.updates_applied += len(applied)
             self.stats.last_update = ", ".join(applied)
             self.stats.last_error = ""
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.stats.last_activity_at = now
+            self.stats.recent_activity.appendleft(
+                RecentActivity(
+                    at=now,
+                    packet=text,
+                    summary=", ".join(applied),
+                )
+            )

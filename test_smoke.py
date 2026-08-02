@@ -8,7 +8,12 @@ from packet_codec import (
     encode_status,
 )
 from meshtastic_client import MeshtasticClient
-from sync_state import compute_sync_rows, save_last_sync
+from sync_state import (
+    compute_changes_since_baseline,
+    compute_sync_rows,
+    rows_to_baseline,
+    save_last_sync,
+)
 
 
 def test_sync_state_delta(tmp_path) -> None:
@@ -34,6 +39,22 @@ def test_sync_state_delta(tmp_path) -> None:
     assert mode == "delta"
     assert to_send == [("H001", "YELLOW")]
     print("sync_state: OK")
+
+
+def test_receiver_changes() -> None:
+    rows = [
+        {"house_id": "H001", "status_code": "GREEN", "timestamp": "t1"},
+        {"house_id": "H002", "status_code": "RED", "timestamp": "t2"},
+    ]
+    baseline = rows_to_baseline(rows)
+    rows[0]["status_code"] = "YELLOW"
+    rows[1]["status_code"] = "RED"
+    changes = compute_changes_since_baseline(rows, baseline)
+    assert len(changes) == 1
+    assert changes[0].house_id == "H001"
+    assert changes[0].previous_status == "GREEN"
+    assert changes[0].current_status == "YELLOW"
+    print("receiver_changes: OK")
 
 
 def test_packet_codec() -> None:
@@ -83,5 +104,6 @@ if __name__ == "__main__":
     test_packet_codec()
     with tempfile.TemporaryDirectory() as tmp:
         test_sync_state_delta(Path(tmp))
+    test_receiver_changes()
     test_mock_fallback()
     print("All smoke tests passed.")

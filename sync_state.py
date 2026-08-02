@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import csv
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from config import CSV_FIELDS, CSV_PATH, LAST_SYNC_PATH
 
 _lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class HouseChange:
+    house_id: str
+    previous_status: str | None
+    current_status: str
+    timestamp: str
 
 
 def has_last_sync(path: Path | None = None) -> bool:
@@ -75,3 +84,41 @@ def compute_sync_rows(
     if not changes:
         return [], "none"
     return changes, "delta"
+
+
+def compute_changes_since_baseline(
+    current_rows: list[dict[str, str]],
+    baseline: dict[str, str],
+) -> list[HouseChange]:
+    """Return houses whose status differs from the receiver watch baseline."""
+    changes: list[HouseChange] = []
+
+    for row in current_rows:
+        house_id = row["house_id"].upper()
+        current_status = row["status_code"]
+        previous_status = baseline.get(house_id)
+
+        if previous_status is None:
+            changes.append(
+                HouseChange(
+                    house_id=house_id,
+                    previous_status=None,
+                    current_status=current_status,
+                    timestamp=row.get("timestamp", ""),
+                )
+            )
+        elif previous_status != current_status:
+            changes.append(
+                HouseChange(
+                    house_id=house_id,
+                    previous_status=previous_status,
+                    current_status=current_status,
+                    timestamp=row.get("timestamp", ""),
+                )
+            )
+
+    return sorted(changes, key=lambda c: c.house_id)
+
+
+def rows_to_baseline(rows: list[dict[str, str]]) -> dict[str, str]:
+    return {row["house_id"].upper(): row["status_code"] for row in rows}
