@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import (
     STATUS_BG,
@@ -34,6 +36,7 @@ from house_store import (
 )
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
+from print_board import build_printable_html
 from precinct_store import (
     PrecinctPaths,
     get_district_for_precinct,
@@ -213,6 +216,66 @@ def _status_pill(code: str) -> str:
         f'<span class="status-pill" style="background:{bg};color:{fg};">'
         f"{code}</span>"
     )
+
+
+def _render_print_board_actions(
+    rows: list[dict],
+    *,
+    title: str,
+    subtitle: str,
+    file_stem: str,
+    paths: PrecinctPaths | None = None,
+    show_precinct: bool = False,
+    change_labels: dict[str, str] | None = None,
+) -> None:
+    if show_precinct:
+        display_rows = _attach_district_addresses(rows)
+    elif paths is not None:
+        display_rows = attach_addresses(rows, path=paths.addresses)
+    else:
+        display_rows = attach_addresses(rows)
+
+    html = build_printable_html(
+        display_rows,
+        title=title,
+        subtitle=subtitle,
+        show_precinct=show_precinct,
+        change_labels=change_labels,
+    )
+    safe_stem = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in file_stem)
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.download_button(
+            "Download printable board",
+            data=html,
+            file_name=f"{safe_stem}-board.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+    with col2:
+        components.html(
+            f"""
+            <button id="print-board-btn" style="
+                width: 100%;
+                font-size: 1rem;
+                padding: 0.55rem 1rem;
+                border: 1px solid rgba(49, 51, 63, 0.2);
+                border-radius: 0.5rem;
+                background: white;
+                cursor: pointer;
+            ">Print board</button>
+            <script>
+            document.getElementById("print-board-btn").onclick = function() {{
+                var printWindow = window.open("", "_blank");
+                printWindow.document.write({json.dumps(html)});
+                printWindow.document.close();
+                printWindow.onload = function() {{ printWindow.print(); }};
+            }};
+            </script>
+            """,
+            height=60,
+        )
 
 
 def _render_connection_banner() -> None:
@@ -670,6 +733,13 @@ def _render_transmitter_mode() -> None:
         st.caption("First sync transmits the full neighborhood board.")
 
     rows = sort_rows_by_urgency(read_all(path=paths.status))
+    _render_print_board_actions(
+        rows,
+        title="Neighborhood Status Board",
+        subtitle=f"Precinct: {precinct_label}",
+        file_stem=_active_precinct_id(),
+        paths=paths,
+    )
     _render_status_table(rows, paths)
 
     st.divider()
@@ -881,6 +951,14 @@ def _render_receiver_mode() -> None:
     st.divider()
     st.subheader(f"District board ({len(rows)} houses)")
     st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
+    _render_print_board_actions(
+        rows,
+        title="District Status Board",
+        subtitle=f"District: {district_label}",
+        file_stem=district_id,
+        show_precinct=True,
+        change_labels=change_labels,
+    )
     _render_readonly_board(rows, change_labels=change_labels, show_precinct=True)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
