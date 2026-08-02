@@ -253,6 +253,21 @@ def _ensure_text_message_listener() -> None:
         _register_text_message_listener()
 
 
+def _message_alert_key(item: dict) -> str:
+    return f"{item.get('at')}|{item.get('from_id')}|{item.get('text')}"
+
+
+def _dismiss_text_alert() -> None:
+    alert = st.session_state.get("text_message_alert")
+    if alert:
+        dismissed = list(st.session_state.get("text_message_alert_dismissed_keys", []))
+        key = _message_alert_key(alert)
+        if key not in dismissed:
+            dismissed.append(key)
+        st.session_state.text_message_alert_dismissed_keys = dismissed[-50:]
+    st.session_state.text_message_alert = None
+
+
 def _sync_text_messages() -> list[dict]:
     if "text_messages" not in st.session_state:
         st.session_state.text_messages = []
@@ -273,7 +288,9 @@ def _sync_text_messages() -> list[dict]:
             new_received_alert = item
 
     if new_received_alert is not None:
-        st.session_state.text_message_alert = new_received_alert
+        dismissed = st.session_state.get("text_message_alert_dismissed_keys", [])
+        if _message_alert_key(new_received_alert) not in dismissed:
+            st.session_state.text_message_alert = new_received_alert
 
     for item in st.session_state.text_messages:
         if item.get("from_id") and not item.get("sender_name"):
@@ -301,6 +318,8 @@ def _init_session_state() -> None:
         st.session_state.text_messages = []
     if "text_message_alert" not in st.session_state:
         st.session_state.text_message_alert = None
+    if "text_message_alert_dismissed_keys" not in st.session_state:
+        st.session_state.text_message_alert_dismissed_keys = []
     _ensure_text_message_listener()
     if "receiver" not in st.session_state:
         st.session_state.receiver = MeshReceiver(st.session_state.client)
@@ -1167,7 +1186,6 @@ def _format_change_time(ts: str) -> str:
         return ts or "—"
 
 
-@st.fragment(run_every=2)
 def _render_text_message_alert() -> None:
     alert = st.session_state.get("text_message_alert")
     if not alert:
@@ -1186,9 +1204,22 @@ def _render_text_message_alert() -> None:
         """,
         unsafe_allow_html=True,
     )
-    if st.button("Dismiss alert", key="dismiss_text_alert", use_container_width=True):
-        st.session_state.text_message_alert = None
-        st.rerun()
+    st.button(
+        "Dismiss alert",
+        key="dismiss_text_alert",
+        use_container_width=True,
+        on_click=_dismiss_text_alert,
+    )
+
+
+def _render_text_message_alert_section() -> None:
+    _sync_text_messages()
+    _render_text_message_alert()
+
+
+@st.fragment(run_every=2)
+def _render_text_message_alert_section_live() -> None:
+    _render_text_message_alert_section()
 
 
 @st.fragment(run_every=2)
@@ -1335,9 +1366,11 @@ def main() -> None:
     _init_session_state()
     _ensure_text_message_listener()
     _render_connection_banner()
-    _render_text_message_alert()
+    if st.session_state.mode == "Transmitter":
+        _render_text_message_alert_section_live()
+    else:
+        _render_text_message_alert_section()
     _render_sidebar()
-    _sync_text_messages()
 
     if st.session_state.mode == "Transmitter":
         if st.session_state.receiver.stats.running:
