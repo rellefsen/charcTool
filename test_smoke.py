@@ -193,13 +193,30 @@ def test_precinct_store(tmp_path) -> None:
         assert org["districts"][0]["id"] == "CHARC"
         assert org["precincts"][0]["id"] == "CHARC01"
 
+        district = precinct_store.add_district("SOUTH", "South District")
+        assert district.id == "SOUTH"
+        assert {d.id for d in precinct_store.list_districts()} == {"CHARC", "SOUTH"}
+
         precinct = precinct_store.add_precinct("CHARC", "02", "Pine Ridge")
         assert precinct.id == "CHARC02"
         assert precinct_store.make_precinct_id("CHARC", "03") == "CHARC03"
         assert precinct_store.suggest_next_precinct_suffix("CHARC") == "03"
         assert precinct_store.precinct_ids_for_district("CHARC") == {"CHARC01", "CHARC02"}
 
-        paths = precinct_store.paths_for_precinct("CHARC02")
+        south_precinct = precinct_store.add_precinct("SOUTH", "01", "South 01")
+        assert south_precinct.id == "SOUTH01"
+        precinct_store.remove_precinct("SOUTH01")
+        assert south_precinct.id not in precinct_store.precinct_ids_for_district("SOUTH")
+        assert not (config.PRECINCTS_DIR / "SOUTH01").exists()
+
+        precinct_store.remove_precinct("CHARC02")
+        assert precinct_store.precinct_ids_for_district("CHARC") == {"CHARC01"}
+        assert not (config.PRECINCTS_DIR / "CHARC02").exists()
+
+        precinct_store.remove_district("SOUTH")
+        assert {d.id for d in precinct_store.list_districts()} == {"CHARC"}
+
+        paths = precinct_store.paths_for_precinct("CHARC01")
         assert paths.status.name == "neighborhood_status.csv"
     finally:
         config.ORGANIZATION_PATH = orig_org
