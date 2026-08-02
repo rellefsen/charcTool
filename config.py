@@ -5,10 +5,21 @@ from pathlib import Path
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
+PRECINCTS_DIR = DATA_DIR / "precincts"
+ORGANIZATION_PATH = DATA_DIR / "organization.json"
+
+# Legacy flat paths (migrated into data/precincts/{precinct_id}/ on startup)
 CSV_PATH = DATA_DIR / "neighborhood_status.csv"
 LAST_SYNC_PATH = DATA_DIR / "last_mesh_sync.csv"
 ADDRESSES_PATH = DATA_DIR / "house_addresses.csv"
 SETTINGS_PATH = DATA_DIR / "app_settings.json"
+
+# Default district / first precinct for new installs and migration
+DEFAULT_DISTRICT_ID = "CHARC"
+DEFAULT_DISTRICT_NAME = "Default District"
+DEFAULT_PRECINCT_ID = "CHARC01"
+DEFAULT_PRECINCT_NAME = "Precinct 01"
+DEFAULT_PRECINCT_SUFFIX = "01"
 
 # CSV schema
 CSV_FIELDS = ("house_id", "status_code", "timestamp")

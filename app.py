@@ -12,9 +12,10 @@ from config import (
     STATUS_CODES,
     STATUS_COLORS,
     STATUS_LABELS,
+    STATUS_URGENCY,
 )
-from address_store import attach_addresses, init_addresses, read_address_map, update_address
-from csv_store import init_csv, read_all, sort_rows_by_urgency, update_status
+from address_store import attach_addresses, default_address, read_address_map, update_address
+from csv_store import ensure_status_csv, read_all, sort_rows_by_urgency, update_status
 from house_store import (
     HouseStoreError,
     add_house,
@@ -25,15 +26,24 @@ from house_store import (
 )
 from meshtastic_client import MeshtasticClient, list_serial_ports
 from packet_codec import encode_bulk_sync_chunks
+from precinct_store import (
+    PrecinctPaths,
+    get_district_for_precinct,
+    get_precinct,
+    init_organization,
+    init_precinct_data,
+    list_districts,
+    list_precincts,
+    migrate_legacy_data,
+    paths_for_precinct,
+    precinct_ids_for_district,
+)
 from receiver import MeshReceiver
 from settings_store import SettingsError, load_settings, save_settings
 from sync_state import (
-    compute_changes_since_baseline,
     compute_sync_rows,
     has_last_sync,
-    rows_to_baseline,
     save_last_sync,
-    sort_changes_by_urgency,
 )
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,20 +60,90 @@ def _sync_packet_delay() -> float:
     return float(st.session_state.app_settings["sync_packet_delay"])
 
 
+def _active_precinct_id() -> str:
+    return str(st.session_state.app_settings["active_precinct_id"]).upper()
+
+
+def _active_district_id() -> str:
+    return str(st.session_state.app_settings["active_district_id"]).upper()
+
+
+def _active_paths() -> PrecinctPaths:
+    return paths_for_precinct(_active_precinct_id())
+
+
+def _save_context_settings(**updates: object) -> None:
+    settings = {**st.session_state.app_settings, **updates}
+    st.session_state.app_settings = save_settings(settings)
+
+
+def _configure_receiver() -> None:
+    district_id = _active_district_id()
+    precincts = list_precincts(district_id)
+    st.session_state.receiver.watched_precinct_ids = precinct_ids_for_district(district_id)
+    st.session_state.receiver.legacy_precinct_id = (
+        precincts[0].id if len(precincts) == 1 else None
+    )
+
+
+def _read_district_rows(district_id: str) -> list[dict]:
+    rows: list[dict] = []
+    for precinct in list_precincts(district_id):
+        paths = paths_for_precinct(precinct.id)
+        paths.status.parent.mkdir(parents=True, exist_ok=True)
+        ensure_status_csv(paths.status)
+        for row in read_all(path=paths.status):
+            rows.append({**row, "precinct_id": precinct.id})
+    return sort_rows_by_urgency(rows)
+
+
+def _district_baseline(rows: list[dict]) -> dict[str, str]:
+    return {
+        f"{row['precinct_id']}:{row['house_id'].upper()}": row["status_code"]
+        for row in rows
+    }
+
+
+def _compute_district_changes(
+    rows: list[dict],
+    baseline: dict[str, str],
+) -> list[dict]:
+    changes: list[dict] = []
+    for row in rows:
+        key = f"{row['precinct_id']}:{row['house_id'].upper()}"
+        previous = baseline.get(key)
+        current = row["status_code"]
+        if previous != current:
+            changes.append(
+                {
+                    "precinct_id": row["precinct_id"],
+                    "house_id": row["house_id"],
+                    "previous_status": previous,
+                    "current_status": current,
+                    "timestamp": row.get("timestamp", ""),
+                }
+            )
+    return sorted(
+        changes,
+        key=lambda c: (
+            STATUS_URGENCY.get(c["current_status"], 99),
+            c["precinct_id"],
+            c["house_id"],
+        ),
+    )
+
+
 def _init_session_state() -> None:
-    init_csv()
-    added = ensure_default_houses()
-    if added:
-        logger.info("Added %s default houses to CSV", added)
-    addr_added = ensure_default_addresses()
-    if addr_added:
-        logger.info("Added %s default addresses", addr_added)
+    migrate_legacy_data()
+    init_organization()
     if "app_settings" not in st.session_state:
         st.session_state.app_settings = load_settings()
+    init_precinct_data(st.session_state.app_settings["active_precinct_id"])
     if "client" not in st.session_state:
         st.session_state.client = _create_client(st.session_state.app_settings)
     if "receiver" not in st.session_state:
         st.session_state.receiver = MeshReceiver(st.session_state.client)
+    _configure_receiver()
     if "mode" not in st.session_state:
         st.session_state.mode = "Transmitter"
     if "pending_edits" not in st.session_state:
@@ -107,21 +187,6 @@ st.markdown(
 )
 
 
-def _init_session_state() -> None:
-    init_csv()
-    init_addresses()
-    if "client" not in st.session_state:
-        st.session_state.client = MeshtasticClient()
-    if "receiver" not in st.session_state:
-        st.session_state.receiver = MeshReceiver(st.session_state.client)
-    if "mode" not in st.session_state:
-        st.session_state.mode = "Transmitter"
-    if "pending_edits" not in st.session_state:
-        st.session_state.pending_edits = {}
-    if "last_sync_log" not in st.session_state:
-        st.session_state.last_sync_log = []
-
-
 def _status_pill(code: str) -> str:
     bg = STATUS_BG.get(code, "#F3F4F6")
     fg = STATUS_COLORS.get(code, "#111827")
@@ -151,6 +216,56 @@ def _render_sidebar() -> None:
             help="Transmitter: edit statuses and sync to mesh. "
             "Receiver: listen for incoming updates.",
         )
+
+        st.divider()
+        st.subheader("Organization")
+        if st.session_state.mode == "Transmitter":
+            precincts = list_precincts()
+            precinct_labels = {p.id: f"{p.id} — {p.name}" for p in precincts}
+            current_precinct = _active_precinct_id()
+            precinct_ids = [p.id for p in precincts]
+            selected_precinct = st.selectbox(
+                "Active precinct",
+                precinct_ids,
+                index=precinct_ids.index(current_precinct)
+                if current_precinct in precinct_ids
+                else 0,
+                format_func=lambda pid: precinct_labels.get(pid, pid),
+                help="Each precinct has its own local status and address CSV files.",
+            )
+            if selected_precinct != current_precinct:
+                _save_context_settings(
+                    active_precinct_id=selected_precinct,
+                    active_district_id=get_district_for_precinct(selected_precinct),
+                )
+                st.session_state.pending_edits.clear()
+                init_precinct_data(selected_precinct)
+                _configure_receiver()
+                st.rerun()
+        else:
+            districts = list_districts()
+            district_labels = {d.id: f"{d.id} — {d.name}" for d in districts}
+            current_district = _active_district_id()
+            district_ids = [d.id for d in districts]
+            selected_district = st.selectbox(
+                "Active district",
+                district_ids,
+                index=district_ids.index(current_district)
+                if current_district in district_ids
+                else 0,
+                format_func=lambda did: district_labels.get(did, did),
+                help="Receiver aggregates all precinct CSVs in the selected district.",
+            )
+            if selected_district != current_district:
+                _save_context_settings(active_district_id=selected_district)
+                st.session_state.pop("receiver_baseline", None)
+                _configure_receiver()
+                st.rerun()
+            watched = list_precincts(selected_district)
+            st.caption(
+                f"Listening for **{len(watched)}** precinct(s): "
+                + ", ".join(p.id for p in watched)
+            )
 
         st.divider()
         st.subheader("Radio")
@@ -209,6 +324,7 @@ def _render_sidebar() -> None:
                     st.session_state.client.close()
                     st.session_state.client = _create_client(new_settings)
                     st.session_state.receiver = MeshReceiver(st.session_state.client)
+                    _configure_receiver()
                     st.toast("Settings saved — reconnecting radio")
                     st.rerun()
                 except SettingsError as exc:
@@ -218,6 +334,7 @@ def _render_sidebar() -> None:
             st.session_state.client.close()
             st.session_state.client = _create_client(st.session_state.app_settings)
             st.session_state.receiver = MeshReceiver(st.session_state.client)
+            _configure_receiver()
             st.rerun()
 
         st.divider()
@@ -226,14 +343,18 @@ def _render_sidebar() -> None:
             "Simulate an incoming mesh packet locally (does not transmit over the radio). "
             "Use in **Receiver** mode to update the board."
         )
-        mock_msg = st.text_input("Simulate incoming packet", value="NS:H001:R")
+        mock_msg = st.text_input(
+            "Simulate incoming packet",
+            value=f"NS:{_active_precinct_id()}:H001:R",
+        )
         if st.button("Inject mock packet", use_container_width=True):
             st.session_state.client.mock_inject(mock_msg)
             st.toast(f"Injected: {mock_msg}")
 
         st.divider()
         st.subheader("Mesh sync")
-        if has_last_sync():
+        paths = _active_paths()
+        if has_last_sync(path=paths.last_sync):
             st.caption("Next sync sends **changed houses only**.")
         else:
             st.caption("First sync will send **all houses**.")
@@ -245,13 +366,14 @@ def _render_sidebar() -> None:
         st.divider()
         st.subheader("House management")
         st.caption("Local board only. Addresses are **never transmitted** over the mesh.")
-        house_ids = [r["house_id"] for r in read_all()]
-        st.caption(f"**{len(house_ids)}** houses on board")
+        paths = _active_paths()
+        house_ids = [r["house_id"] for r in read_all(path=paths.status)]
+        st.caption(f"**{len(house_ids)}** houses in **{_active_precinct_id()}**")
 
         with st.expander("Add house", expanded=False):
             new_id = st.text_input(
                 "House ID",
-                value=suggest_next_house_id(),
+                value=suggest_next_house_id(paths),
                 key="add_house_id",
                 help="1–8 letters or numbers, e.g. H061",
             )
@@ -261,7 +383,7 @@ def _render_sidebar() -> None:
             )
             if st.button("Add house", use_container_width=True, key="add_house_btn"):
                 try:
-                    add_house(new_id, new_addr or None)
+                    add_house(new_id, paths, new_addr or None)
                     st.toast(f"Added {normalize_house_id(new_id)}")
                     st.rerun()
                 except HouseStoreError as exc:
@@ -270,14 +392,14 @@ def _render_sidebar() -> None:
         if house_ids:
             with st.expander("Edit address", expanded=False):
                 edit_house = st.selectbox("Edit address for", house_ids, key="edit_address_house")
-                address_map = read_address_map()
+                address_map = read_address_map(path=paths.addresses)
                 new_address = st.text_input(
                     "Street address",
                     value=address_map.get(edit_house.upper(), ""),
                     key="edit_address_text",
                 )
                 if st.button("Save address", use_container_width=True):
-                    update_address(edit_house, new_address)
+                    update_address(edit_house, new_address, path=paths.addresses)
                     st.toast(f"Saved address for {edit_house}")
                     st.rerun()
 
@@ -287,7 +409,7 @@ def _render_sidebar() -> None:
                 if st.button("Rename house", use_container_width=True, key="rename_btn"):
                     try:
                         new_name = normalize_house_id(rename_to)
-                        rename_house(rename_from, rename_to)
+                        rename_house(rename_from, rename_to, paths)
                         st.toast(f"Renamed {rename_from} → {new_name}")
                         st.rerun()
                     except HouseStoreError as exc:
@@ -300,16 +422,16 @@ def _render_sidebar() -> None:
                 )
                 if st.button("Remove house", use_container_width=True, key="remove_btn"):
                     try:
-                        remove_house(remove_id)
+                        remove_house(remove_id, paths)
                         st.toast(f"Removed {remove_id}")
                         st.rerun()
                     except HouseStoreError as exc:
                         st.error(str(exc))
 
 
-def _render_status_table(rows: list[dict]) -> None:
+def _render_status_table(rows: list[dict], paths: PrecinctPaths) -> None:
     st.subheader("Neighborhood Status Board")
-    rows = attach_addresses(rows)
+    rows = attach_addresses(rows, path=paths.addresses)
 
     header = st.columns([1.5, 2.5, 2, 2.5, 1.5])
     header[0].markdown("**House**")
@@ -349,32 +471,75 @@ def _render_status_table(rows: list[dict]) -> None:
         cols[4].caption(display_ts)
 
 
+def _attach_district_addresses(rows: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for row in rows:
+        paths = paths_for_precinct(row["precinct_id"])
+        address_map = read_address_map(path=paths.addresses)
+        enriched.append(
+            {
+                **row,
+                "address": address_map.get(
+                    row["house_id"].upper(),
+                    default_address(row["house_id"]),
+                ),
+            }
+        )
+    return enriched
+
+
 def _render_readonly_board(
     rows: list[dict],
-    pending_house_ids: set[str] | None = None,
+    paths: PrecinctPaths | None = None,
+    pending_keys: set[str] | None = None,
+    show_precinct: bool = False,
 ) -> None:
     """Read-only neighborhood board for Receiver mode (no edits, all houses)."""
-    rows = attach_addresses(rows)
-    pending_house_ids = pending_house_ids or set()
+    if show_precinct:
+        rows = _attach_district_addresses(rows)
+    elif paths is not None:
+        rows = attach_addresses(rows, path=paths.addresses)
+    else:
+        rows = attach_addresses(rows)
+    pending_keys = pending_keys or set()
 
-    header = st.columns([1.5, 2.5, 2, 1.5, 1.5])
-    header[0].markdown("**House**")
-    header[1].markdown("**Address**")
-    header[2].markdown("**Status**")
-    header[3].markdown("**Updated**")
-    header[4].markdown("**Changed**")
+    if show_precinct:
+        header = st.columns([1.2, 1.2, 2.2, 2, 1.5, 1.2])
+        header[0].markdown("**Precinct**")
+        header[1].markdown("**House**")
+        header[2].markdown("**Address**")
+        header[3].markdown("**Status**")
+        header[4].markdown("**Updated**")
+        header[5].markdown("**Changed**")
+        col_weights = [1.2, 1.2, 2.2, 2, 1.5, 1.2]
+    else:
+        header = st.columns([1.5, 2.5, 2, 1.5, 1.5])
+        header[0].markdown("**House**")
+        header[1].markdown("**Address**")
+        header[2].markdown("**Status**")
+        header[3].markdown("**Updated**")
+        header[4].markdown("**Changed**")
+        col_weights = [1.5, 2.5, 2, 1.5, 1.5]
 
     for row in rows:
         house_id = row["house_id"]
         current = row["status_code"]
         ts = row.get("timestamp", "")
         address = row.get("address", "—")
-        changed = house_id.upper() in pending_house_ids
+        precinct_id = row.get("precinct_id", "")
+        change_key = (
+            f"{precinct_id}:{house_id.upper()}" if show_precinct else house_id.upper()
+        )
+        changed = change_key in pending_keys
 
-        cols = st.columns([1.5, 2.5, 2, 1.5, 1.5])
-        cols[0].markdown(f"### {house_id}")
-        cols[1].markdown(address)
-        cols[2].markdown(_status_pill(current), unsafe_allow_html=True)
+        cols = st.columns(col_weights)
+        offset = 0
+        if show_precinct:
+            cols[0].markdown(f"**{precinct_id}**")
+            offset = 1
+        cols[offset].markdown(f"### {house_id}")
+        cols[offset + 1].markdown(address)
+        cols[offset + 2].markdown(_status_pill(current), unsafe_allow_html=True)
 
         try:
             display_ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime(
@@ -382,35 +547,40 @@ def _render_readonly_board(
             )
         except ValueError:
             display_ts = ts
-        cols[3].caption(display_ts)
-        cols[4].markdown("**Yes**" if changed else "—")
+        cols[offset + 3].caption(display_ts)
+        cols[offset + 4].markdown("**Yes**" if changed else "—")
 
 
-def _apply_pending_edits() -> None:
+def _apply_pending_edits(paths: PrecinctPaths) -> None:
     for house_id, status in st.session_state.pending_edits.items():
-        update_status(house_id, status)
+        update_status(house_id, status, path=paths.status)
     if st.session_state.pending_edits:
         st.session_state.pending_edits.clear()
 
 
 def _render_transmitter_mode() -> None:
+    paths = _active_paths()
+    precinct = get_precinct(_active_precinct_id())
+    precinct_label = f"{precinct.id} — {precinct.name}" if precinct else _active_precinct_id()
+
     st.title("📤 Transmitter Mode")
+    st.caption(f"Precinct: **{precinct_label}**")
     st.caption("Update house statuses and sync to the mesh network.")
     st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
-    if has_last_sync():
+    if has_last_sync(path=paths.last_sync):
         st.caption("Only changed houses are sent after the first successful sync.")
     else:
         st.caption("First sync transmits the full neighborhood board.")
 
-    rows = sort_rows_by_urgency(read_all())
-    _render_status_table(rows)
+    rows = sort_rows_by_urgency(read_all(path=paths.status))
+    _render_status_table(rows, paths)
 
     st.divider()
 
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("💾 Save Local Changes", use_container_width=True, type="secondary"):
-            _apply_pending_edits()
+            _apply_pending_edits(paths)
             st.success("Saved to local CSV.")
             st.rerun()
 
@@ -422,17 +592,21 @@ def _render_transmitter_mode() -> None:
         )
 
     if sync_clicked:
-        _apply_pending_edits()
-        rows = read_all()
+        _apply_pending_edits(paths)
+        rows = read_all(path=paths.status)
         force_full = st.session_state.get("force_full_sync", False)
-        sync_rows, sync_mode = compute_sync_rows(rows, force_full=force_full)
+        sync_rows, sync_mode = compute_sync_rows(
+            rows,
+            force_full=force_full,
+            last_sync_path=paths.last_sync,
+        )
 
         if sync_mode == "none":
             st.info("Nothing to sync — no house statuses have changed since last mesh sync.")
             st.rerun()
 
         try:
-            packets = encode_bulk_sync_chunks(sync_rows)
+            packets = encode_bulk_sync_chunks(_active_precinct_id(), sync_rows)
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
@@ -509,7 +683,7 @@ def _render_transmitter_mode() -> None:
             )
 
         if success == total_packets:
-            save_last_sync(rows)
+            save_last_sync(rows, path=paths.last_sync)
             st.session_state.force_full_sync = False
 
         st.rerun()
@@ -520,13 +694,13 @@ def _render_transmitter_mode() -> None:
                 st.write(line)
 
 
-def _ensure_receiver_baseline() -> None:
+def _ensure_receiver_baseline(rows: list[dict]) -> None:
     if "receiver_baseline" not in st.session_state:
-        st.session_state.receiver_baseline = rows_to_baseline(read_all())
+        st.session_state.receiver_baseline = _district_baseline(rows)
 
 
-def _reset_receiver_baseline() -> None:
-    st.session_state.receiver_baseline = rows_to_baseline(read_all())
+def _reset_receiver_baseline(rows: list[dict]) -> None:
+    st.session_state.receiver_baseline = _district_baseline(rows)
 
 
 def _format_change_time(ts: str) -> str:
@@ -537,20 +711,23 @@ def _format_change_time(ts: str) -> str:
 
 
 def _render_receiver_mode() -> None:
+    district_id = _active_district_id()
+    districts = {d.id: d.name for d in list_districts()}
+    district_label = f"{district_id} — {districts.get(district_id, district_id)}"
+
     st.title("📥 Receiver Mode")
+    st.caption(f"District: **{district_label}**")
     st.caption("Listening for mesh updates and refreshing the status board.")
-    _ensure_receiver_baseline()
 
     receiver: MeshReceiver = st.session_state.receiver
     if not receiver.stats.running:
         receiver.start()
 
     stats = receiver.stats
-    rows = sort_rows_by_urgency(read_all())
+    rows = _read_district_rows(district_id)
+    _ensure_receiver_baseline(rows)
     baseline = st.session_state.receiver_baseline
-    pending = sort_changes_by_urgency(
-        compute_changes_since_baseline(rows, baseline)
-    )
+    pending = _compute_district_changes(rows, baseline)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Packets received", stats.packets_received)
@@ -568,18 +745,20 @@ def _render_receiver_mode() -> None:
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("✓ Mark all reviewed", use_container_width=True, type="primary"):
-            _reset_receiver_baseline()
+            _reset_receiver_baseline(rows)
             st.toast("Baseline updated — pending changes cleared.")
             st.rerun()
     with col_b:
         if st.button("↺ Reset watch baseline", use_container_width=True):
-            _reset_receiver_baseline()
+            _reset_receiver_baseline(rows)
             st.toast("Watching for new changes from this board state.")
             st.rerun()
 
     st.divider()
 
-    pending_ids = {c.house_id.upper() for c in pending}
+    pending_keys = {
+        f"{change['precinct_id']}:{change['house_id'].upper()}" for change in pending
+    }
     if pending:
         st.subheader(f"Changes since watch started ({len(pending)})")
         st.caption(
@@ -599,9 +778,9 @@ def _render_receiver_mode() -> None:
                 )
 
     st.divider()
-    st.subheader(f"Neighborhood board ({len(rows)} houses)")
+    st.subheader(f"District board ({len(rows)} houses)")
     st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
-    _render_readonly_board(rows, pending_ids)
+    _render_readonly_board(rows, pending_keys=pending_keys, show_precinct=True)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
     c1, c2, c3 = st.columns(3)

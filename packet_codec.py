@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from config import (
     MESH_MAX_PAYLOAD_BYTES,
@@ -12,32 +13,55 @@ from config import (
     STATUS_WIRE,
 )
 
-# Wire format: NS:H001:R  (prefix:house_id:status_letter)
+# New wire format: NS:CHARC01:H001:R
 _PACKET_RE = re.compile(
-    rf"^{re.escape(PACKET_PREFIX)}:([A-Za-z0-9]{{1,8}}):([RYG])$",
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):([A-Z0-9]{{1,8}}):([RYG])$",
     re.IGNORECASE,
 )
 
-# Bulk sync format: NS:B:H001Y,H002R,H003G
+# Legacy single-house format: NS:H001:R
+_LEGACY_PACKET_RE = re.compile(
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{1,8}}):([RYG])$",
+    re.IGNORECASE,
+)
+
+# New bulk format: NS:CHARC01:B:H001Y,H002R
 _BULK_RE = re.compile(
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):B:(.+)$",
+    re.IGNORECASE,
+)
+
+# Legacy bulk format: NS:B:H001Y,H002R
+_LEGACY_BULK_RE = re.compile(
     rf"^{re.escape(PACKET_PREFIX)}:B:(.+)$",
     re.IGNORECASE,
 )
+
 _BULK_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})([RYG])$", re.IGNORECASE)
 
 
-def encode_status(house_id: str, status_code: str) -> str:
+@dataclass(frozen=True)
+class MeshUpdate:
+    precinct_id: str | None
+    house_id: str
+    status_code: str
+
+
+def encode_status(precinct_id: str, house_id: str, status_code: str) -> str:
     """Build a short text packet for mesh transmission."""
+    precinct_id = precinct_id.strip().upper()
     house_id = house_id.strip().upper()
     status_code = status_code.strip().upper()
 
     if status_code not in STATUS_CODES:
         raise ValueError(f"Invalid status code: {status_code}")
+    if not precinct_id:
+        raise ValueError("precinct_id is required")
     if not house_id:
         raise ValueError("house_id is required")
 
     wire_status = STATUS_WIRE[status_code]
-    return f"{PACKET_PREFIX}:{house_id}:{wire_status}"
+    return f"{PACKET_PREFIX}:{precinct_id}:{house_id}:{wire_status}"
 
 
 def _house_part(house_id: str, status_code: str) -> str:
@@ -50,8 +74,9 @@ def _house_part(house_id: str, status_code: str) -> str:
     return f"{house_id}{STATUS_WIRE[status_code]}"
 
 
-def _bulk_packet_for_parts(parts: list[str]) -> str:
-    return f"{PACKET_PREFIX}:B:{','.join(parts)}"
+def _bulk_packet_for_parts(precinct_id: str, parts: list[str]) -> str:
+    precinct_id = precinct_id.strip().upper()
+    return f"{PACKET_PREFIX}:{precinct_id}:B:{','.join(parts)}"
 
 
 def _packet_byte_len(packet: str) -> int:
@@ -59,17 +84,22 @@ def _packet_byte_len(packet: str) -> int:
 
 
 def encode_bulk_sync_chunks(
+    precinct_id: str,
     rows: list[tuple[str, str]],
     max_bytes: int = MESH_MAX_PAYLOAD_BYTES,
 ) -> list[str]:
     """
     Encode house statuses into one or more bulk mesh packets.
 
-    Splits across multiple NS:B:... packets when the full board exceeds
+    Splits across multiple NS:{precinct}:B:... packets when the full board exceeds
     max_bytes. Each chunk is independently decodable on the receiver.
     """
     if not rows:
         raise ValueError("rows must not be empty")
+
+    precinct_id = precinct_id.strip().upper()
+    if not precinct_id:
+        raise ValueError("precinct_id is required")
 
     parts = [_house_part(house_id, status_code) for house_id, status_code in rows]
     chunks: list[list[str]] = []
@@ -77,7 +107,7 @@ def encode_bulk_sync_chunks(
 
     for part in parts:
         candidate = current + [part]
-        packet = _bulk_packet_for_parts(candidate)
+        packet = _bulk_packet_for_parts(precinct_id, candidate)
         if _packet_byte_len(packet) <= max_bytes:
             current = candidate
             continue
@@ -85,7 +115,7 @@ def encode_bulk_sync_chunks(
         if current:
             chunks.append(current)
             current = [part]
-            packet = _bulk_packet_for_parts(current)
+            packet = _bulk_packet_for_parts(precinct_id, current)
             if _packet_byte_len(packet) > max_bytes:
                 raise ValueError(
                     f"House entry {part!r} exceeds packet limit ({max_bytes} bytes)"
@@ -98,16 +128,16 @@ def encode_bulk_sync_chunks(
     if current:
         chunks.append(current)
 
-    return [_bulk_packet_for_parts(chunk) for chunk in chunks]
+    return [_bulk_packet_for_parts(precinct_id, chunk) for chunk in chunks]
 
 
-def encode_bulk_sync(rows: list[tuple[str, str]]) -> str:
+def encode_bulk_sync(precinct_id: str, rows: list[tuple[str, str]]) -> str:
     """
     Encode all house statuses into a single bulk mesh packet.
 
     Raises ValueError if the board is too large; use encode_bulk_sync_chunks().
     """
-    chunks = encode_bulk_sync_chunks(rows)
+    chunks = encode_bulk_sync_chunks(precinct_id, rows)
     if len(chunks) > 1:
         raise ValueError(
             f"Bulk sync requires {len(chunks)} packets; use encode_bulk_sync_chunks()"
@@ -115,59 +145,95 @@ def encode_bulk_sync(rows: list[tuple[str, str]]) -> str:
     return chunks[0]
 
 
-def decode_updates(text: str) -> list[tuple[str, str]]:
+def decode_updates(text: str) -> list[MeshUpdate]:
     """
-    Parse a mesh message into zero or more (house_id, status_code) updates.
+    Parse a mesh message into zero or more neighborhood status updates.
 
-    Supports single-packet (NS:H001:R) and bulk-sync (NS:B:H001Y,H002R) formats.
+    Supports precinct-tagged and legacy packet formats.
     """
     if not text:
         return []
 
     text = text.strip()
+
     bulk_match = _BULK_RE.match(text)
     if bulk_match:
-        updates: list[tuple[str, str]] = []
-        for part in bulk_match.group(1).split(","):
-            part = part.strip()
-            if not part:
-                continue
-            part_match = _BULK_PART_RE.match(part)
-            if part_match is None:
-                continue
-            house_id = part_match.group(1).upper()
-            status_code = STATUS_FROM_WIRE.get(part_match.group(2).upper())
-            if status_code is not None:
-                updates.append((house_id, status_code))
-        return updates
+        precinct_id = bulk_match.group(1).upper()
+        return _parse_bulk_parts(precinct_id, bulk_match.group(2))
+
+    legacy_bulk_match = _LEGACY_BULK_RE.match(text)
+    if legacy_bulk_match:
+        return _parse_bulk_parts(None, legacy_bulk_match.group(1))
 
     single = decode_packet(text)
     return [single] if single else []
 
 
-def decode_packet(text: str) -> tuple[str, str] | None:
+def _parse_bulk_parts(precinct_id: str | None, payload: str) -> list[MeshUpdate]:
+    updates: list[MeshUpdate] = []
+    for part in payload.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        part_match = _BULK_PART_RE.match(part)
+        if part_match is None:
+            continue
+        house_id = part_match.group(1).upper()
+        status_code = STATUS_FROM_WIRE.get(part_match.group(2).upper())
+        if status_code is not None:
+            updates.append(
+                MeshUpdate(
+                    precinct_id=precinct_id,
+                    house_id=house_id,
+                    status_code=status_code,
+                )
+            )
+    return updates
+
+
+def decode_packet(text: str) -> MeshUpdate | None:
     """
     Parse an incoming single-house mesh text message.
 
-    Returns (house_id, status_code) or None if not a neighborhood packet.
+    Returns MeshUpdate or None if not a neighborhood packet.
     """
     if not text:
         return None
 
     text = text.strip()
     match = _PACKET_RE.match(text)
-    if not match:
-        return None
+    if match:
+        precinct_id = match.group(1).upper()
+        house_id = match.group(2).upper()
+        wire_status = match.group(3).upper()
+        status_code = STATUS_FROM_WIRE.get(wire_status)
+        if status_code is None:
+            return None
+        return MeshUpdate(
+            precinct_id=precinct_id,
+            house_id=house_id,
+            status_code=status_code,
+        )
 
-    house_id = match.group(1).upper()
-    wire_status = match.group(2).upper()
-    status_code = STATUS_FROM_WIRE.get(wire_status)
-    if status_code is None:
-        return None
+    legacy_match = _LEGACY_PACKET_RE.match(text)
+    if legacy_match:
+        house_id = legacy_match.group(1).upper()
+        wire_status = legacy_match.group(2).upper()
+        status_code = STATUS_FROM_WIRE.get(wire_status)
+        if status_code is None:
+            return None
+        return MeshUpdate(
+            precinct_id=None,
+            house_id=house_id,
+            status_code=status_code,
+        )
 
-    return house_id, status_code
+    return None
 
 
-def encode_bulk(rows: list[tuple[str, str]]) -> list[str]:
+def encode_bulk(precinct_id: str, rows: list[tuple[str, str]]) -> list[str]:
     """Encode multiple house statuses as individual packets."""
-    return [encode_status(house_id, status) for house_id, status in rows]
+    return [
+        encode_status(precinct_id, house_id, status_code)
+        for house_id, status_code in rows
+    ]

@@ -13,6 +13,7 @@ from config import RECEIVER_POLL_INTERVAL
 from csv_store import apply_remote_update
 from meshtastic_client import MeshtasticClient
 from packet_codec import decode_updates
+from precinct_store import paths_for_precinct
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class MeshReceiver:
 
     client: MeshtasticClient
     poll_interval: float = RECEIVER_POLL_INTERVAL
+    watched_precinct_ids: set[str] = field(default_factory=set)
+    legacy_precinct_id: str | None = None
     _thread: threading.Thread | None = field(default=None, init=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False)
     stats: ReceiverStats = field(default_factory=ReceiverStats)
@@ -94,14 +97,37 @@ class MeshReceiver:
             return
 
         applied: list[str] = []
-        for house_id, status_code in parsed:
+        for update in parsed:
+            precinct_id = update.precinct_id or self.legacy_precinct_id
+            if precinct_id is None:
+                logger.warning("Ignoring legacy packet without precinct context: %s", text)
+                continue
+            precinct_id = precinct_id.upper()
+            if self.watched_precinct_ids and precinct_id not in self.watched_precinct_ids:
+                logger.debug("Ignoring packet for unwatched precinct %s", precinct_id)
+                continue
+
             try:
-                row = apply_remote_update(house_id, status_code)
-                applied.append(f"{row['house_id']} → {row['status_code']}")
-                logger.info("Applied mesh update: %s → %s", house_id, status_code)
+                paths = paths_for_precinct(precinct_id)
+                row = apply_remote_update(
+                    update.house_id,
+                    update.status_code,
+                    path=paths.status,
+                )
+                applied.append(f"{precinct_id}/{row['house_id']} → {row['status_code']}")
+                logger.info(
+                    "Applied mesh update: %s/%s → %s",
+                    precinct_id,
+                    update.house_id,
+                    update.status_code,
+                )
             except Exception as exc:
                 self.stats.last_error = str(exc)
-                logger.exception("Failed to apply mesh update for %s", house_id)
+                logger.exception(
+                    "Failed to apply mesh update for %s/%s",
+                    precinct_id,
+                    update.house_id,
+                )
 
         if applied:
             self.stats.updates_applied += len(applied)
