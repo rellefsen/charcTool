@@ -7,6 +7,8 @@ import threading
 from typing import Any
 
 from config import (
+    DEFAULT_DISTRICT_ID,
+    DEFAULT_PRECINCT_ID,
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_PORT,
     SYNC_PACKET_DELAY,
@@ -19,6 +21,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "meshtastic_port": MESHTASTIC_PORT,
     "channel_name": MESHTASTIC_CHANNEL_NAME,
     "sync_packet_delay": SYNC_PACKET_DELAY,
+    "active_precinct_id": DEFAULT_PRECINCT_ID,
+    "active_district_id": DEFAULT_DISTRICT_ID,
 }
 
 
@@ -45,6 +49,11 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
         settings["sync_packet_delay"] = float(delay)
     except (TypeError, ValueError) as exc:
         raise SettingsError("Sync delay must be a number.") from exc
+
+    precinct = str(raw.get("active_precinct_id", settings["active_precinct_id"])).strip().upper()
+    district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()
+    settings["active_precinct_id"] = precinct or DEFAULT_PRECINCT_ID
+    settings["active_district_id"] = district or DEFAULT_DISTRICT_ID
 
     validate_settings(settings)
     return settings

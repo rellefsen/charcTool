@@ -20,6 +20,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def ensure_status_csv(path: Path | None = None) -> Path:
+    """Create an empty status CSV (header only) if it does not exist."""
+    target = path or CSV_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with _lock:
+        if target.exists():
+            return target
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+    return target
+
+
 def init_csv(path: Path | None = None) -> Path:
     """Create the CSV with default houses if it does not exist."""
     target = path or CSV_PATH
@@ -79,7 +94,7 @@ def ensure_default_houses(path: Path | None = None) -> int:
 def read_all(path: Path | None = None) -> list[dict[str, str]]:
     """Return all rows sorted by house_id."""
     target = path or CSV_PATH
-    init_csv(target)
+    ensure_status_csv(target)
 
     with _lock:
         with target.open(newline="", encoding="utf-8") as fh:
@@ -106,7 +121,7 @@ def update_status(
 ) -> dict[str, str]:
     """Update one house status and return the updated row."""
     target = path or CSV_PATH
-    init_csv(target)
+    ensure_status_csv(target)
     house_id = house_id.strip().upper()
     ts = _now_iso()
 
@@ -141,7 +156,7 @@ def update_status(
 def remove_house(house_id: str, path: Path | None = None) -> None:
     """Remove a house from the status CSV."""
     target = path or CSV_PATH
-    init_csv(target)
+    ensure_status_csv(target)
     house_id = house_id.strip().upper()
 
     with _lock:
@@ -161,7 +176,7 @@ def remove_house(house_id: str, path: Path | None = None) -> None:
 def rename_house(old_id: str, new_id: str, path: Path | None = None) -> dict[str, str]:
     """Rename a house id in the status CSV."""
     target = path or CSV_PATH
-    init_csv(target)
+    ensure_status_csv(target)
     old_id = old_id.strip().upper()
     new_id = new_id.strip().upper()
 
