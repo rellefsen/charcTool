@@ -58,3 +58,9 @@ MESHTASTIC_CHANNEL_NAME = "charcStatus"
 
 # Receiver poll interval (seconds)
 RECEIVER_POLL_INTERVAL = 2.0
+
+# Max UTF-8 bytes for a Meshtastic text payload (mesh_pb2.Constants.DATA_PAYLOAD_LEN)
+MESH_MAX_PAYLOAD_BYTES = 233
+
+# Delay between chunked sync packets so LoRa can finish each transmission
+SYNC_PACKET_DELAY = 2.0

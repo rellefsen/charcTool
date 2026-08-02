@@ -16,7 +16,7 @@ from config import (
 )
 from csv_store import init_csv, read_all, update_status
 from meshtastic_client import MeshtasticClient, list_serial_ports
-from packet_codec import encode_bulk
+from packet_codec import encode_bulk_sync_chunks
 from receiver import MeshReceiver
 
 logging.basicConfig(level=logging.INFO)
@@ -200,18 +200,29 @@ def _render_transmitter_mode() -> None:
     if sync_clicked:
         _apply_pending_edits()
         rows = read_all()
-        packets = encode_bulk(
-            [(r["house_id"], r["status_code"]) for r in rows]
-        )
+        try:
+            packets = encode_bulk_sync_chunks(
+                [(r["house_id"], r["status_code"]) for r in rows]
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+
         success, errors = st.session_state.client.send_many(packets)
         st.session_state.last_sync_log = [
-            f"Synced {success}/{len(packets)} packets"
+            f"Bulk sync: {len(rows)} houses in {len(packets)} packet(s)",
+            *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(packets)],
         ] + errors
 
         if errors:
-            st.error("Some packets failed to send.")
+            st.error(f"Sent {success}/{len(packets)} packets — some failed.")
+        elif len(packets) == 1:
+            st.success(f"Successfully synced {len(rows)} house statuses in one mesh packet!")
         else:
-            st.success(f"Successfully synced {success} status packets to mesh!")
+            st.success(
+                f"Successfully synced {len(rows)} house statuses "
+                f"across {len(packets)} mesh packets!"
+            )
         st.rerun()
 
     if st.session_state.last_sync_log:

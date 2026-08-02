@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from config import RECEIVER_POLL_INTERVAL
 from csv_store import apply_remote_update
 from meshtastic_client import MeshtasticClient
-from packet_codec import decode_packet
+from packet_codec import decode_updates
 
 logger = logging.getLogger(__name__)
 
@@ -76,17 +76,21 @@ class MeshReceiver:
         self.stats.packets_received += 1
         self.stats.last_packet = text
 
-        parsed = decode_packet(text)
-        if parsed is None:
+        parsed = decode_updates(text)
+        if not parsed:
             return
 
-        house_id, status_code = parsed
-        try:
-            row = apply_remote_update(house_id, status_code)
-            self.stats.updates_applied += 1
-            self.stats.last_update = f"{row['house_id']} → {row['status_code']}"
+        applied: list[str] = []
+        for house_id, status_code in parsed:
+            try:
+                row = apply_remote_update(house_id, status_code)
+                applied.append(f"{row['house_id']} → {row['status_code']}")
+                logger.info("Applied mesh update: %s → %s", house_id, status_code)
+            except Exception as exc:
+                self.stats.last_error = str(exc)
+                logger.exception("Failed to apply mesh update for %s", house_id)
+
+        if applied:
+            self.stats.updates_applied += len(applied)
+            self.stats.last_update = ", ".join(applied)
             self.stats.last_error = ""
-            logger.info("Applied mesh update: %s → %s", house_id, status_code)
-        except Exception as exc:
-            self.stats.last_error = str(exc)
-            logger.exception("Failed to apply mesh update")

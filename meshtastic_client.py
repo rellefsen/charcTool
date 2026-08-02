@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT
+from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT, SYNC_PACKET_DELAY
 
 logger = logging.getLogger(__name__)
 
@@ -222,16 +223,22 @@ class MeshtasticClient:
                 self._reset_connection()
                 return False, f"Send failed: {exc}"
 
-    def send_many(self, messages: list[str]) -> tuple[int, list[str]]:
-        """Send multiple packets; returns (success_count, error_messages)."""
+    def send_many(
+        self,
+        messages: list[str],
+        delay_seconds: float = SYNC_PACKET_DELAY,
+    ) -> tuple[int, list[str]]:
+        """Send multiple packets with a delay between each for LoRa airtime."""
         errors: list[str] = []
         success = 0
-        for msg in messages:
+        for index, msg in enumerate(messages):
             ok, detail = self.send_text(msg)
             if ok:
                 success += 1
             else:
                 errors.append(detail)
+            if delay_seconds > 0 and index < len(messages) - 1:
+                time.sleep(delay_seconds)
         return success, errors
 
     def register_receive_callback(self, callback: ReceiveCallback) -> None:
