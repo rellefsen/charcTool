@@ -14,7 +14,15 @@ from config import (
     STATUS_LABELS,
     STATUS_URGENCY,
 )
-from address_store import attach_addresses, default_address, read_address_map, update_address
+from address_store import (
+    AddressStoreError,
+    attach_addresses,
+    default_address,
+    import_addresses,
+    parse_address_csv,
+    read_address_map,
+    update_address,
+)
 from csv_store import ensure_status_csv, read_all, sort_rows_by_urgency, update_status
 from house_store import (
     HouseStoreError,
@@ -399,6 +407,81 @@ def _render_sidebar() -> None:
                     st.rerun()
                 except HouseStoreError as exc:
                     st.error(str(exc))
+
+        with st.expander("Import addresses", expanded=False):
+            st.caption(
+                "Upload or paste a CSV with `house_id,address` columns. "
+                "Only houses on this precinct's board are updated."
+            )
+            uploaded = st.file_uploader(
+                "Address CSV",
+                type=["csv"],
+                key="import_address_file",
+            )
+            pasted = st.text_area(
+                "Or paste CSV",
+                placeholder="house_id,address\nH001,142 Oak St\nH002,144 Oak St",
+                key="import_address_text",
+                height=120,
+            )
+
+            csv_text = ""
+            if uploaded is not None:
+                csv_text = uploaded.getvalue().decode("utf-8-sig")
+            elif pasted.strip():
+                csv_text = pasted
+
+            preview_rows: list[dict[str, str]] = []
+            parse_error = ""
+            if csv_text.strip():
+                try:
+                    preview_rows = parse_address_csv(csv_text)
+                except AddressStoreError as exc:
+                    parse_error = str(exc)
+
+            if parse_error:
+                st.error(parse_error)
+            elif preview_rows:
+                known_ids = {house_id.upper() for house_id in house_ids}
+                importable = sum(1 for row in preview_rows if row["house_id"] in known_ids)
+                skipped = len(preview_rows) - importable
+                st.caption(
+                    f"**{len(preview_rows)}** rows parsed — "
+                    f"**{importable}** will import, **{skipped}** skipped (unknown house IDs)."
+                )
+                st.code(
+                    "\n".join(
+                        f"{row['house_id']},{row['address']}"
+                        for row in preview_rows[:5]
+                    )
+                    + ("\n..." if len(preview_rows) > 5 else ""),
+                    language="text",
+                )
+
+            if st.button("Import addresses", use_container_width=True, key="import_address_btn"):
+                if not house_ids:
+                    st.error("Add houses to this precinct before importing addresses.")
+                elif not csv_text.strip():
+                    st.error("Upload a CSV file or paste address rows first.")
+                elif parse_error:
+                    st.error(parse_error)
+                else:
+                    try:
+                        rows = parse_address_csv(csv_text)
+                        result = import_addresses(
+                            rows,
+                            path=paths.addresses,
+                            known_house_ids={house_id.upper() for house_id in house_ids},
+                        )
+                        st.toast(
+                            "Imported addresses: "
+                            f"{result['added']} added, "
+                            f"{result['updated']} updated, "
+                            f"{result['skipped']} skipped"
+                        )
+                        st.rerun()
+                    except AddressStoreError as exc:
+                        st.error(str(exc))
 
         if house_ids:
             with st.expander("Edit address", expanded=False):

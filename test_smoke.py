@@ -269,6 +269,53 @@ def test_house_management(tmp_path) -> None:
     print("house_management: OK")
 
 
+def test_bulk_address_import(tmp_path) -> None:
+    import csv
+
+    from address_store import import_addresses, parse_address_csv, read_address_map
+    from config import ADDRESS_FIELDS, CSV_FIELDS
+    from packet_codec import encode_status
+    from precinct_store import PrecinctPaths
+
+    status_path = tmp_path / "status.csv"
+    addr_path = tmp_path / "addresses.csv"
+    paths = PrecinctPaths(
+        precinct_id="CHARC01",
+        status=status_path,
+        addresses=addr_path,
+        last_sync=tmp_path / "last_sync.csv",
+    )
+
+    with status_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerow({"house_id": "H001", "status_code": "GREEN", "timestamp": "t1"})
+        writer.writerow({"house_id": "H002", "status_code": "GREEN", "timestamp": "t1"})
+
+    with addr_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=ADDRESS_FIELDS)
+        writer.writeheader()
+        writer.writerow({"house_id": "H001", "address": "101 Oak St"})
+        writer.writerow({"house_id": "H002", "address": "102 Oak St"})
+
+    csv_text = "house_id,address\nH001,142 Oak St\nH002,144 Oak St\nH999,999 Unknown St"
+    rows = parse_address_csv(csv_text)
+    result = import_addresses(
+        rows,
+        path=paths.addresses,
+        known_house_ids={"H001", "H002"},
+    )
+    assert result == {"updated": 2, "added": 0, "skipped": 1}
+
+    address_map = read_address_map(path=paths.addresses)
+    assert address_map["H001"] == "142 Oak St"
+    assert address_map["H002"] == "144 Oak St"
+    assert "H999" not in address_map
+    assert "Oak" not in encode_status("CHARC01", "H001", "GREEN")
+
+    print("bulk_address_import: OK")
+
+
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
@@ -298,5 +345,6 @@ if __name__ == "__main__":
         test_settings_store(Path(tmp))
         test_precinct_store(Path(tmp))
         test_house_management(Path(tmp))
+        test_bulk_address_import(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")

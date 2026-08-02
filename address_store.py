@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
 import threading
 from pathlib import Path
@@ -16,6 +17,11 @@ from config import (
 
 _lock = threading.Lock()
 _HOUSE_NUM = re.compile(r"(\d+)$")
+_HOUSE_ID_RE = re.compile(r"^[A-Z0-9]{1,8}$")
+
+
+class AddressStoreError(ValueError):
+    """Raised when address storage operations fail validation."""
 
 
 def _ensure_data_dir() -> None:
@@ -149,6 +155,91 @@ def rename_address(old_id: str, new_id: str, path: Path | None = None) -> None:
             writer = csv.DictWriter(fh, fieldnames=ADDRESS_FIELDS)
             writer.writeheader()
             writer.writerows(sorted(rows, key=lambda r: r["house_id"]))
+
+
+def parse_address_csv(text: str) -> list[dict[str, str]]:
+    """Parse CSV text with house_id and address columns."""
+    text = text.strip()
+    if not text:
+        raise AddressStoreError("CSV is empty.")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise AddressStoreError("CSV must include a header row.")
+
+    normalized_fields = {name.strip().lower(): name for name in reader.fieldnames if name}
+    missing = [field for field in ADDRESS_FIELDS if field not in normalized_fields]
+    if missing:
+        raise AddressStoreError(
+            f"CSV must include columns: {', '.join(ADDRESS_FIELDS)}."
+        )
+
+    rows: list[dict[str, str]] = []
+    for line_no, row in enumerate(reader, start=2):
+        house_id = (row.get(normalized_fields["house_id"]) or "").strip().upper()
+        address = (row.get(normalized_fields["address"]) or "").strip()
+        if not house_id and not address:
+            continue
+        if not house_id:
+            raise AddressStoreError(f"Line {line_no}: house_id is required.")
+        if not address:
+            raise AddressStoreError(f"Line {line_no}: address is required for {house_id}.")
+        if not _HOUSE_ID_RE.match(house_id):
+            raise AddressStoreError(
+                f"Line {line_no}: invalid house ID {house_id!r} (1–8 letters or numbers)."
+            )
+        rows.append({"house_id": house_id, "address": address})
+
+    if not rows:
+        raise AddressStoreError("CSV contains no address rows.")
+
+    return rows
+
+
+def import_addresses(
+    rows: list[dict[str, str]],
+    path: Path | None = None,
+    *,
+    known_house_ids: set[str] | None = None,
+) -> dict[str, int]:
+    """Merge imported addresses into the local address book."""
+    target = path or ADDRESSES_PATH
+    init_addresses(target)
+
+    known = {house_id.upper() for house_id in known_house_ids or set()}
+    updated = 0
+    added = 0
+    skipped = 0
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            existing_rows = list(csv.DictReader(fh))
+
+        address_map = {
+            row["house_id"].upper(): row["address"] for row in existing_rows
+        }
+
+        for row in rows:
+            house_id = row["house_id"].upper()
+            address = row["address"]
+            if known and house_id not in known:
+                skipped += 1
+                continue
+            if house_id in address_map:
+                updated += 1
+            else:
+                added += 1
+            address_map[house_id] = address
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=ADDRESS_FIELDS)
+            writer.writeheader()
+            writer.writerows(
+                {"house_id": house_id, "address": address}
+                for house_id, address in sorted(address_map.items())
+            )
+
+    return {"updated": updated, "added": added, "skipped": skipped}
 
 
 def attach_addresses(
