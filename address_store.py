@@ -111,6 +111,46 @@ def update_address(house_id: str, address: str, path: Path | None = None) -> dic
     return updated
 
 
+def remove_address(house_id: str, path: Path | None = None) -> None:
+    target = path or ADDRESSES_PATH
+    init_addresses(target)
+    house_id = house_id.strip().upper()
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        new_rows = [r for r in rows if r["house_id"].upper() != house_id]
+        if len(new_rows) == len(rows):
+            return
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=ADDRESS_FIELDS)
+            writer.writeheader()
+            writer.writerows(sorted(new_rows, key=lambda r: r["house_id"]))
+
+
+def rename_address(old_id: str, new_id: str, path: Path | None = None) -> None:
+    target = path or ADDRESSES_PATH
+    init_addresses(target)
+    old_id = old_id.strip().upper()
+    new_id = new_id.strip().upper()
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        for row in rows:
+            if row["house_id"].upper() == old_id:
+                row["house_id"] = new_id
+                break
+
+        with target.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=ADDRESS_FIELDS)
+            writer.writeheader()
+            writer.writerows(sorted(rows, key=lambda r: r["house_id"]))
+
+
 def attach_addresses(
     rows: list[dict[str, str]],
     path: Path | None = None,
