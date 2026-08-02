@@ -33,6 +33,8 @@ pip install -r requirements.txt
 # Initialize data directory and CSV
 echo "Initializing neighborhood status CSV ..."
 python3 -c "from csv_store import init_csv, ensure_default_houses; init_csv(); added = ensure_default_houses(); print('  ->', init_csv()); print(f'  -> added {added} default houses')"
+echo "Initializing local house addresses (UI only) ..."
+python3 -c "from address_store import init_addresses, ensure_default_addresses; init_addresses(); added = ensure_default_addresses(); print('  ->', init_addresses()); print(f'  -> added {added} default addresses')"
 
 # Serial port probe (informational only — app runs without a radio)
 echo ""

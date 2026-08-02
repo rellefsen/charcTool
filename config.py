@@ -7,9 +7,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 CSV_PATH = DATA_DIR / "neighborhood_status.csv"
 LAST_SYNC_PATH = DATA_DIR / "last_mesh_sync.csv"
+ADDRESSES_PATH = DATA_DIR / "house_addresses.csv"
 
 # CSV schema
 CSV_FIELDS = ("house_id", "status_code", "timestamp")
+ADDRESS_FIELDS = ("house_id", "address")
 
 # Status codes — single-letter wire format in mesh packets
 STATUS_RED = "RED"
@@ -57,6 +59,9 @@ PACKET_PREFIX = "NS"
 
 # Default sample houses for first-time setup (60 houses exercises multi-packet bulk sync)
 DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 61)]
+
+# Placeholder street name for auto-generated local addresses (UI only)
+DEFAULT_STREET_NAME = "Oak St"
 
 # Meshtastic serial (None = auto-detect)
 MESHTASTIC_PORT: str | None = None
