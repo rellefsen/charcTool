@@ -14,6 +14,7 @@ from meshtastic_client import MeshtasticClient
 from sync_state import (
     compute_changes_since_baseline,
     compute_sync_rows,
+    format_status_change,
     rows_to_baseline,
     save_last_sync,
     sort_changes_by_urgency,
@@ -59,6 +60,13 @@ def test_receiver_changes() -> None:
     assert changes[0].previous_status == "GREEN"
     assert changes[0].current_status == "YELLOW"
     print("receiver_changes: OK")
+
+
+def test_status_change_label() -> None:
+    assert format_status_change("GREEN", "RED") == "GREEN → RED"
+    assert format_status_change("YELLOW", "GREEN") == "YELLOW → GREEN"
+    assert format_status_change(None, "RED") == "NEW → RED"
+    print("status_change_label: OK")
 
 
 def test_addresses_local_only() -> None:
@@ -283,6 +291,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         test_sync_state_delta(Path(tmp))
     test_receiver_changes()
+    test_status_change_label()
     test_addresses_local_only()
     test_urgency_sort()
     with tempfile.TemporaryDirectory() as tmp:
