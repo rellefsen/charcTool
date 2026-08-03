@@ -92,3 +92,7 @@ MESH_MAX_PAYLOAD_BYTES = 233
 
 # Delay between chunked sync packets so LoRa can finish each transmission
 SYNC_PACKET_DELAY = 2.0
+
+# After a full data export, keep accepting status packets for this many seconds
+# (mesh packets can arrive out of order)
+IMPORT_GRACE_SECONDS = 300.0
