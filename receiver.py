@@ -10,9 +10,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from address_store import apply_remote_addresses
-from config import IMPORT_GRACE_SECONDS, RECEIVER_POLL_INTERVAL
+from config import EXPORT_ACK_WINDOW, IMPORT_GRACE_SECONDS, RECEIVER_POLL_INTERVAL
 from csv_store import apply_remote_update, ensure_status_csv
-from mesh_data_codec import MeshDataKind, MeshDataPacket, decode_mesh_data
+from mesh_data_codec import (
+    MeshDataKind,
+    MeshDataPacket,
+    decode_mesh_data,
+    parse_numbered_export_packet,
+)
 from meshtastic_client import MeshtasticClient
 from packet_codec import decode_updates
 from precinct_store import ensure_precinct_from_import, paths_for_precinct, upsert_district, upsert_precinct
@@ -58,6 +63,7 @@ class MeshReceiver:
     stats: ReceiverStats = field(default_factory=ReceiverStats)
     _import_seq: int | None = field(default=None, init=False)
     _import_total: int | None = field(default=None, init=False)
+    _import_ack_window: int = field(default=EXPORT_ACK_WINDOW, init=False)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -117,8 +123,29 @@ class MeshReceiver:
             and self._import_seq is not None
             and self._import_total is not None
         ):
-            self._send_export_ack(self._import_seq, self._import_total)
-            self._import_seq = None
+            window = max(1, self._import_ack_window)
+            if (
+                self._import_seq % window == 0
+                or self._import_seq == self._import_total
+            ):
+                self._send_export_ack(self._import_seq, self._import_total)
+                self._import_seq = None
+
+    def _track_import_sequence(self, packet: MeshDataPacket) -> None:
+        if packet.seq is not None:
+            self._import_seq = packet.seq
+        if packet.total is not None:
+            self._import_total = packet.total
+
+    def _unwrap_numbered_message(self, text: str) -> tuple[str, int | None, int | None]:
+        numbered = parse_numbered_export_packet(text)
+        if numbered is None:
+            return text, None, None
+        seq, total, body = numbered
+        if self.stats.import_mode:
+            self._import_seq = seq
+            self._import_total = total
+        return body, seq, total
 
     def _should_apply_status(self, precinct_id: str) -> bool:
         if self.stats.import_mode or self._import_grace_active():
@@ -130,12 +157,14 @@ class MeshReceiver:
         self.stats.packets_received += 1
         self.stats.last_packet = text
 
-        data_packet = decode_mesh_data(text)
+        body, _, _ = self._unwrap_numbered_message(text)
+
+        data_packet = decode_mesh_data(body)
         if data_packet is not None:
             self._apply_data_packet(data_packet, text)
             return
 
-        parsed = decode_updates(text)
+        parsed = decode_updates(body)
         if not parsed:
             return
 
@@ -189,6 +218,10 @@ class MeshReceiver:
                 self.stats.import_mode = True
                 self._import_seq = None
                 self._import_total = packet.total
+                self._import_ack_window = max(
+                    1,
+                    packet.ack_window or EXPORT_ACK_WINDOW,
+                )
                 self._extend_import_grace()
                 summary_parts.append("Full data import started")
             elif packet.kind == MeshDataKind.END:
@@ -204,6 +237,7 @@ class MeshReceiver:
                 self._extend_import_grace()
             elif packet.kind == MeshDataKind.DISTRICT:
                 assert packet.district_id is not None
+                self._track_import_sequence(packet)
                 district = upsert_district(
                     packet.district_id,
                     packet.district_name or packet.district_id,
@@ -215,6 +249,7 @@ class MeshReceiver:
             elif packet.kind == MeshDataKind.PRECINCT:
                 assert packet.precinct_id is not None
                 assert packet.district_id is not None
+                self._track_import_sequence(packet)
                 precinct = upsert_precinct(
                     packet.precinct_id,
                     packet.district_id,
@@ -227,6 +262,7 @@ class MeshReceiver:
                 self._maybe_ack_imported_payload()
             elif packet.kind == MeshDataKind.ADDRESSES:
                 assert packet.precinct_id is not None
+                self._track_import_sequence(packet)
                 ensure_precinct_from_import(packet.precinct_id)
                 self._track_precinct(packet.precinct_id)
                 paths = paths_for_precinct(packet.precinct_id)

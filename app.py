@@ -37,7 +37,7 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
-from mesh_data_codec import build_full_export_payloads
+from mesh_data_codec import build_export_payloads, estimate_export_seconds
 from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
@@ -97,24 +97,40 @@ def _sync_packet_delay() -> float:
 
 
 def _export_packet_delay() -> float:
-    return float(st.session_state.app_settings.get("export_packet_delay", 4.0))
+    return float(st.session_state.app_settings.get("export_packet_delay", 2.0))
+
+
+def _export_min_packet_delay() -> float:
+    return float(st.session_state.app_settings.get("export_min_packet_delay", 0.5))
 
 
 def _export_ack_timeout() -> float:
-    return float(st.session_state.app_settings.get("export_ack_timeout", 15.0))
+    return float(st.session_state.app_settings.get("export_ack_timeout", 8.0))
 
 
 def _export_max_retries() -> int:
-    return int(st.session_state.app_settings.get("export_max_retries", 3))
+    return int(st.session_state.app_settings.get("export_max_retries", 2))
+
+
+def _export_ack_window() -> int:
+    return int(st.session_state.app_settings.get("export_ack_window", 3))
 
 
 def _send_export_with_acks(payloads: list[str]) -> tuple[int, list[str], int]:
     """Send a full export with ACK/retry. Returns acked count, errors, total payloads."""
     total = len(payloads)
     delay = _export_packet_delay()
+    min_delay = _export_min_packet_delay()
     ack_timeout = _export_ack_timeout()
     max_retries = _export_max_retries()
-    est_seconds = total * (delay + ack_timeout * 0.5)
+    ack_window = _export_ack_window()
+    est_seconds = estimate_export_seconds(
+        total,
+        delay_seconds=delay,
+        min_delay_seconds=min_delay,
+        ack_timeout_seconds=ack_timeout,
+        ack_window=ack_window,
+    )
 
     with st.status(
         f"Full export: sending {total} payload packet(s) with ACK/retry…",
@@ -122,8 +138,8 @@ def _send_export_with_acks(payloads: list[str]) -> tuple[int, list[str], int]:
     ) as send_status:
         st.caption(
             f"Estimated time: ~{est_seconds:.0f}s "
-            f"({delay:g}s between packets, {ack_timeout:g}s ACK timeout, "
-            f"up to {max_retries} retries)"
+            f"({ack_window}-packet ACK windows, {min_delay:g}–{delay:g}s adaptive delay, "
+            f"{ack_timeout:g}s ACK timeout, up to {max_retries} retries)"
         )
         progress = st.progress(0.0, text="Starting export…")
         detail = st.empty()
@@ -140,25 +156,20 @@ def _send_export_with_acks(payloads: list[str]) -> tuple[int, list[str], int]:
                 + "`"
             )
 
-        def _on_waiting(current: int, total_count: int, wait_delay: float) -> None:
+        def _on_ack_wait(window_end: int, total_count: int, attempt: int) -> None:
             progress.progress(
-                current / total_count,
-                text=f"Waiting {wait_delay:.0f}s for radio airtime…",
-            )
-
-        def _on_ack_wait(seq: int, total_count: int, attempt: int) -> None:
-            progress.progress(
-                seq / total_count,
-                text=f"Waiting for ACK {seq}/{total_count} (attempt {attempt})…",
+                window_end / total_count,
+                text=f"Waiting for ACK {window_end}/{total_count} (attempt {attempt})…",
             )
 
         acked, errors = st.session_state.client.send_export_with_acks(
             payloads,
             delay_seconds=delay,
+            min_delay_seconds=min_delay,
             ack_timeout_seconds=ack_timeout,
             max_retries=max_retries,
+            ack_window=ack_window,
             on_progress=_on_progress,
-            on_waiting=_on_waiting if total > 1 else None,
             on_ack_wait=_on_ack_wait,
         )
 
@@ -994,29 +1005,102 @@ def _render_sidebar() -> None:
         if st.session_state.mode == "Transmitter":
             with st.expander("Full data export", expanded=False):
                 st.caption(
-                    "Send **all districts, precincts, addresses, and house statuses** "
-                    "to receiver nodes. Use this to bootstrap a new receiver with your "
-                    "full organization and local data files."
+                    "Send districts, precincts, addresses, and house statuses to receiver "
+                    "nodes. Scope the export to everything or selected districts/precincts."
                 )
                 districts = list_districts()
                 precincts = list_precincts()
-                st.caption(
-                    f"Will export **{len(districts)}** district(s) and "
-                    f"**{len(precincts)}** precinct(s)."
+                export_scope = st.radio(
+                    "Export scope",
+                    options=["All data", "Selected districts", "Selected precincts"],
+                    horizontal=True,
+                    key="export_scope_radio",
                 )
+                selected_district_ids: set[str] | None = None
+                selected_precinct_ids: set[str] | None = None
+                if export_scope == "Selected districts":
+                    district_options = [district.id for district in districts]
+                    picked_districts = st.multiselect(
+                        "Districts to export",
+                        options=district_options,
+                        default=district_options[:1],
+                        key="export_district_multiselect",
+                    )
+                    selected_district_ids = {did.upper() for did in picked_districts}
+                elif export_scope == "Selected precincts":
+                    precinct_options = [precinct.id for precinct in precincts]
+                    picked_precincts = st.multiselect(
+                        "Precincts to export",
+                        options=precinct_options,
+                        default=[_active_precinct_id()],
+                        key="export_precinct_multiselect",
+                    )
+                    selected_precinct_ids = {pid.upper() for pid in picked_precincts}
+
+                preview_error = ""
+                preview_payloads: list[str] = []
+                try:
+                    preview_payloads = build_export_payloads(
+                        district_ids=selected_district_ids,
+                        precinct_ids=selected_precinct_ids,
+                    )
+                except ValueError as exc:
+                    preview_error = str(exc)
+
+                preview_count = len(preview_payloads)
+                preview_estimate = estimate_export_seconds(
+                    preview_count,
+                    delay_seconds=float(
+                        st.session_state.app_settings.get("export_packet_delay", 2.0)
+                    ),
+                    min_delay_seconds=float(
+                        st.session_state.app_settings.get("export_min_packet_delay", 0.5)
+                    ),
+                    ack_timeout_seconds=float(
+                        st.session_state.app_settings.get("export_ack_timeout", 8.0)
+                    ),
+                    ack_window=int(st.session_state.app_settings.get("export_ack_window", 3)),
+                )
+                if preview_error:
+                    st.warning(preview_error)
+                elif preview_count == 0:
+                    st.warning("Nothing selected to export.")
+                else:
+                    scope_label = {
+                        "All data": f"{len(districts)} district(s) and {len(precincts)} precinct(s)",
+                        "Selected districts": f"{len(selected_district_ids or [])} district(s)",
+                        "Selected precincts": f"{len(selected_precinct_ids or [])} precinct(s)",
+                    }[export_scope]
+                    st.caption(
+                        f"Ready to export **{scope_label}** as "
+                        f"**{preview_count}** payload packet(s) "
+                        f"(~{preview_estimate:.0f}s estimated)."
+                    )
                 st.caption(
-                    "Each payload waits for a receiver ACK and retries on timeout."
+                    "Payloads embed sequence numbers and use windowed ACKs for faster, "
+                    "reliable transfer."
                 )
                 export_delay = st.number_input(
-                    "Export packet delay (seconds)",
+                    "Export max delay (seconds)",
                     min_value=0.0,
                     max_value=60.0,
                     step=0.5,
                     value=float(
-                        st.session_state.app_settings.get("export_packet_delay", 4.0)
+                        st.session_state.app_settings.get("export_packet_delay", 2.0)
                     ),
-                    help="Pause between export packets so LoRa can finish transmitting.",
+                    help="Upper delay between packets; retries use this value.",
                     key="export_packet_delay_input",
+                )
+                export_min_delay = st.number_input(
+                    "Export min delay (seconds)",
+                    min_value=0.0,
+                    max_value=60.0,
+                    step=0.1,
+                    value=float(
+                        st.session_state.app_settings.get("export_min_packet_delay", 0.5)
+                    ),
+                    help="Short pause between packets inside an ACK window.",
+                    key="export_min_packet_delay_input",
                 )
                 export_ack_timeout = st.number_input(
                     "Export ACK timeout (seconds)",
@@ -1024,32 +1108,51 @@ def _render_sidebar() -> None:
                     max_value=120.0,
                     step=1.0,
                     value=float(
-                        st.session_state.app_settings.get("export_ack_timeout", 15.0)
+                        st.session_state.app_settings.get("export_ack_timeout", 8.0)
                     ),
-                    help="How long to wait for the receiver to ACK each payload.",
+                    help="How long to wait for the receiver to ACK each window.",
                     key="export_ack_timeout_input",
+                )
+                export_ack_window = st.number_input(
+                    "Export ACK window (packets)",
+                    min_value=1,
+                    max_value=20,
+                    step=1,
+                    value=int(st.session_state.app_settings.get("export_ack_window", 3)),
+                    help="Receiver ACKs after this many payloads (or at end of export).",
+                    key="export_ack_window_input",
                 )
                 export_max_retries = st.number_input(
                     "Export max retries",
                     min_value=1,
                     max_value=10,
                     step=1,
-                    value=int(st.session_state.app_settings.get("export_max_retries", 3)),
-                    help="How many times to resend a payload if no ACK arrives.",
+                    value=int(st.session_state.app_settings.get("export_max_retries", 2)),
+                    help="How many times to resend a window if no ACK arrives.",
                     key="export_max_retries_input",
                 )
+                export_button_label = {
+                    "All data": "Export all data to mesh",
+                    "Selected districts": "Export selected districts to mesh",
+                    "Selected precincts": "Export selected precincts to mesh",
+                }[export_scope]
                 if st.button(
-                    "Export all data to mesh",
+                    export_button_label,
                     use_container_width=True,
                     key="export_all_data_btn",
                 ):
                     _save_context_settings(
                         export_packet_delay=export_delay,
+                        export_min_packet_delay=export_min_delay,
                         export_ack_timeout=export_ack_timeout,
+                        export_ack_window=int(export_ack_window),
                         export_max_retries=int(export_max_retries),
                     )
                     try:
-                        payloads = build_full_export_payloads()
+                        payloads = build_export_payloads(
+                            district_ids=selected_district_ids,
+                            precinct_ids=selected_precinct_ids,
+                        )
                     except ValueError as exc:
                         st.error(str(exc))
                         st.stop()

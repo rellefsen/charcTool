@@ -643,12 +643,15 @@ def test_export_ack_retry(tmp_path) -> None:
     import csv_store
     import precinct_store
     from mesh_data_codec import (
+        build_export_payloads,
         build_full_export_payloads,
         decode_mesh_data,
         encode_export_ack,
         encode_export_index,
         encode_export_start,
+        encode_numbered_export_packet,
         parse_export_ack,
+        parse_numbered_export_packet,
     )
     from receiver import MeshReceiver
 
@@ -669,8 +672,24 @@ def test_export_ack_retry(tmp_path) -> None:
 
         assert parse_export_ack(encode_export_ack(3, 10)) == (3, 10)
         assert parse_export_ack("hello") is None
-        start = encode_export_start(5)
-        assert start.upper().endswith(":5")
+        start = encode_export_start(5, ack_window=3)
+        assert start.upper().endswith(":5:3")
+
+        numbered = encode_numbered_export_packet(2, 5, "ND:D:SOUTH|South District")
+        assert parse_numbered_export_packet(numbered) == (
+            2,
+            5,
+            "ND:D:SOUTH|South District",
+        )
+        decoded_numbered = decode_mesh_data(numbered)
+        assert decoded_numbered is not None
+        assert decoded_numbered.seq == 2
+        assert decoded_numbered.total == 5
+
+        scoped = build_export_payloads(precinct_ids={"SOUTH01"})
+        assert any("ND:D:SOUTH" in packet for packet in scoped)
+        assert any("ND:P:SOUTH01" in packet for packet in scoped)
+        assert all("CHARC" not in packet for packet in scoped)
 
         payloads = build_full_export_payloads()
         assert len(payloads) >= 4
@@ -687,8 +706,10 @@ def test_export_ack_retry(tmp_path) -> None:
         acked, errors = client.send_export_with_acks(
             payloads,
             delay_seconds=0.0,
+            min_delay_seconds=0.0,
             ack_timeout_seconds=2.0,
             max_retries=2,
+            ack_window=3,
         )
         receiver.stop()
 
@@ -701,7 +722,7 @@ def test_export_ack_retry(tmp_path) -> None:
         rows = csv_store.read_all(recv_paths.status)
         assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
 
-        # Index markers are recognized but do not mutate import state on their own.
+        # Legacy index markers still set import sequence for older transmitters.
         receiver2 = MeshReceiver(client)
         idx = encode_export_index(1, 3)
         packet = decode_mesh_data(idx)

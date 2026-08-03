@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
-from config import DATA_PACKET_PREFIX, MESH_MAX_PAYLOAD_BYTES
+from config import (
+    DATA_PACKET_PREFIX,
+    EXPORT_ACK_TIMEOUT,
+    EXPORT_ACK_WINDOW,
+    EXPORT_MIN_PACKET_DELAY,
+    EXPORT_PACKET_DELAY,
+    MESH_MAX_PAYLOAD_BYTES,
+)
 from csv_store import read_all
 from packet_codec import encode_bulk_sync_chunks
 
+_NUMBERED_EXPORT_RE = re.compile(
+    r"^(ND|NS):(\d+)/(\d+):(.+)$",
+    re.IGNORECASE,
+)
 _DATA_DISTRICT_RE = re.compile(
     rf"^{re.escape(DATA_PACKET_PREFIX)}:D:([A-Z0-9]{{2,8}})\|(.+)$",
     re.IGNORECASE,
@@ -23,7 +35,7 @@ _DATA_ADDRESS_BULK_RE = re.compile(
     re.IGNORECASE,
 )
 _DATA_START_RE = re.compile(
-    rf"^{re.escape(DATA_PACKET_PREFIX)}:S:FULL(?::(\d+))?$",
+    rf"^{re.escape(DATA_PACKET_PREFIX)}:S:FULL(?::(\d+))?(?::(\d+))?$",
     re.IGNORECASE,
 )
 _DATA_END_RE = re.compile(
@@ -67,6 +79,7 @@ class MeshDataPacket:
     addresses: tuple[MeshAddressEntry, ...] = ()
     seq: int | None = None
     total: int | None = None
+    ack_window: int | None = None
 
 
 def _sanitize_field(value: str) -> str:
@@ -77,10 +90,16 @@ def _packet_byte_len(packet: str) -> int:
     return len(packet.encode("utf-8"))
 
 
-def encode_export_start(total_payloads: int | None = None) -> str:
+def encode_export_start(
+    total_payloads: int | None = None,
+    ack_window: int | None = None,
+) -> str:
     if total_payloads is None:
         return f"{DATA_PACKET_PREFIX}:S:FULL"
-    return f"{DATA_PACKET_PREFIX}:S:FULL:{int(total_payloads)}"
+    start = f"{DATA_PACKET_PREFIX}:S:FULL:{int(total_payloads)}"
+    if ack_window is not None:
+        start = f"{start}:{int(ack_window)}"
+    return start
 
 
 def encode_export_end() -> str:
@@ -88,7 +107,48 @@ def encode_export_end() -> str:
 
 
 def encode_export_index(seq: int, total: int) -> str:
+    """Legacy index marker kept for backward compatibility with older transmitters."""
     return f"{DATA_PACKET_PREFIX}:I:{int(seq)}/{int(total)}"
+
+
+def encode_numbered_export_packet(seq: int, total: int, packet: str) -> str:
+    """Prefix a payload with its sequence number (ND:3/24:D:... or NS:3/24:...)."""
+    prefix, _, rest = packet.partition(":")
+    prefix = prefix.upper()
+    if prefix not in {"ND", "NS"}:
+        raise ValueError(f"Cannot number export packet with prefix {prefix!r}")
+    return f"{prefix}:{int(seq)}/{int(total)}:{rest}"
+
+
+def parse_numbered_export_packet(text: str) -> tuple[int, int, str] | None:
+    """Return (seq, total, body) when text embeds an export sequence prefix."""
+    match = _NUMBERED_EXPORT_RE.match(text.strip())
+    if not match:
+        return None
+    prefix = match.group(1).upper()
+    return (
+        int(match.group(2)),
+        int(match.group(3)),
+        f"{prefix}:{match.group(4)}",
+    )
+
+
+def estimate_export_seconds(
+    total_payloads: int,
+    *,
+    delay_seconds: float = EXPORT_PACKET_DELAY,
+    min_delay_seconds: float = EXPORT_MIN_PACKET_DELAY,
+    ack_timeout_seconds: float = EXPORT_ACK_TIMEOUT,
+    ack_window: int = EXPORT_ACK_WINDOW,
+) -> float:
+    """Rough export duration estimate for UI display."""
+    if total_payloads <= 0:
+        return 0.0
+    window = max(1, ack_window)
+    windows = math.ceil(total_payloads / window)
+    per_window = max(min_delay_seconds, 0.0) * max(window - 1, 0)
+    per_window += ack_timeout_seconds * 0.35
+    return windows * per_window + delay_seconds
 
 
 def encode_export_ack(seq: int, total: int) -> str:
@@ -172,12 +232,23 @@ def decode_mesh_data(text: str) -> MeshDataPacket | None:
         return None
 
     text = text.strip()
+    seq: int | None = None
+    total: int | None = None
+    numbered = parse_numbered_export_packet(text)
+    if numbered is not None:
+        seq, total, text = numbered
+
     upper = text.upper()
 
     start_match = _DATA_START_RE.match(upper)
     if start_match:
-        total = int(start_match.group(1)) if start_match.group(1) else None
-        return MeshDataPacket(kind=MeshDataKind.START, total=total)
+        start_total = int(start_match.group(1)) if start_match.group(1) else None
+        ack_window = int(start_match.group(2)) if start_match.group(2) else None
+        return MeshDataPacket(
+            kind=MeshDataKind.START,
+            total=start_total,
+            ack_window=ack_window,
+        )
 
     if _DATA_END_RE.match(upper):
         return MeshDataPacket(kind=MeshDataKind.END)
@@ -200,20 +271,26 @@ def decode_mesh_data(text: str) -> MeshDataPacket | None:
 
     district_match = _DATA_DISTRICT_RE.match(text)
     if district_match:
-        return MeshDataPacket(
+        packet = MeshDataPacket(
             kind=MeshDataKind.DISTRICT,
             district_id=district_match.group(1).upper(),
             district_name=district_match.group(2).strip(),
         )
+        if seq is not None:
+            packet = replace(packet, seq=seq, total=total)
+        return packet
 
     precinct_match = _DATA_PRECINCT_RE.match(text)
     if precinct_match:
-        return MeshDataPacket(
+        packet = MeshDataPacket(
             kind=MeshDataKind.PRECINCT,
             precinct_id=precinct_match.group(1).upper(),
             district_id=precinct_match.group(2).upper(),
             precinct_name=precinct_match.group(3).strip(),
         )
+        if seq is not None:
+            packet = replace(packet, seq=seq, total=total)
+        return packet
 
     address_match = _DATA_ADDRESS_BULK_RE.match(text)
     if address_match:
@@ -232,11 +309,14 @@ def decode_mesh_data(text: str) -> MeshDataPacket | None:
                     address=part_match.group(2).strip(),
                 )
             )
-        return MeshDataPacket(
+        packet = MeshDataPacket(
             kind=MeshDataKind.ADDRESSES,
             precinct_id=precinct_id,
             addresses=tuple(entries),
         )
+        if seq is not None:
+            packet = replace(packet, seq=seq, total=total)
+        return packet
 
     return None
 
@@ -246,17 +326,45 @@ def is_data_packet(text: str) -> bool:
     return decode_mesh_data(text) is not None
 
 
-def build_full_export_payloads() -> list[str]:
-    """Build numbered export payloads (districts, precincts, addresses, statuses)."""
+def build_export_payloads(
+    *,
+    district_ids: set[str] | None = None,
+    precinct_ids: set[str] | None = None,
+) -> list[str]:
+    """Build export payloads for all data or a selected scope."""
     from address_store import read_address_map
-    from precinct_store import list_districts, list_precincts, paths_for_precinct
+    from precinct_store import get_precinct, list_districts, list_precincts, paths_for_precinct
+
+    selected_districts: set[str] = set()
+    selected_precincts: list = []
+
+    if precinct_ids:
+        for precinct_id in sorted({pid.strip().upper() for pid in precinct_ids if pid.strip()}):
+            precinct = get_precinct(precinct_id)
+            if precinct is None:
+                raise ValueError(f"Unknown precinct: {precinct_id}")
+            selected_precincts.append(precinct)
+            selected_districts.add(precinct.district_id)
+    elif district_ids:
+        selected_districts = {did.strip().upper() for did in district_ids if did.strip()}
+        if not selected_districts:
+            raise ValueError("Select at least one district to export.")
+        for district_id in sorted(selected_districts):
+            selected_precincts.extend(list_precincts(district_id))
+    else:
+        selected_districts = {district.id for district in list_districts()}
+        selected_precincts = list_precincts()
 
     packets: list[str] = []
+    district_lookup = {district.id: district for district in list_districts()}
 
-    for district in list_districts():
+    for district_id in sorted(selected_districts):
+        district = district_lookup.get(district_id)
+        if district is None:
+            raise ValueError(f"Unknown district: {district_id}")
         packets.append(encode_district(district.id, district.name))
 
-    for precinct in list_precincts():
+    for precinct in sorted(selected_precincts, key=lambda item: item.id):
         packets.append(
             encode_precinct(precinct.id, precinct.district_id, precinct.name)
         )
@@ -273,6 +381,11 @@ def build_full_export_payloads() -> list[str]:
             packets.extend(encode_bulk_sync_chunks(precinct.id, sync_rows))
 
     return packets
+
+
+def build_full_export_payloads() -> list[str]:
+    """Build numbered export payloads (districts, precincts, addresses, statuses)."""
+    return build_export_payloads()
 
 
 def build_full_export_packets() -> list[str]:

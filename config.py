@@ -93,10 +93,12 @@ MESH_MAX_PAYLOAD_BYTES = 233
 # Delay between chunked sync packets so LoRa can finish each transmission
 SYNC_PACKET_DELAY = 2.0
 
-# Full data export uses slower pacing and application-level ACK/retry
-EXPORT_PACKET_DELAY = 4.0
-EXPORT_ACK_TIMEOUT = 15.0
-EXPORT_MAX_RETRIES = 3
+# Full data export pacing and application-level ACK/retry
+EXPORT_PACKET_DELAY = 2.0
+EXPORT_ACK_TIMEOUT = 8.0
+EXPORT_MAX_RETRIES = 2
+EXPORT_ACK_WINDOW = 3
+EXPORT_MIN_PACKET_DELAY = 0.5
 
 # After a full data export, keep accepting status packets for this many seconds
 # (mesh packets can arrive out of order)
