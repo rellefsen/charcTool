@@ -202,6 +202,24 @@ def add_district(district_id: str, name: str) -> District:
     return District(id=district_id, name=district_name)
 
 
+def upsert_district(district_id: str, name: str) -> District:
+    """Add or update a district from a remote mesh export."""
+    district_id = normalize_id(district_id)
+    validate_district_id(district_id)
+    district_name = name.strip() or district_id
+    org = load_organization()
+
+    for row in org.get("districts", []):
+        if normalize_id(row["id"]) == district_id:
+            row["name"] = district_name
+            save_organization(org)
+            return District(id=district_id, name=district_name)
+
+    org["districts"].append({"id": district_id, "name": district_name})
+    save_organization(org)
+    return District(id=district_id, name=district_name)
+
+
 def add_precinct(district_id: str, suffix: str, name: str) -> Precinct:
     district_id = normalize_id(district_id)
     validate_district_id(district_id)
@@ -225,6 +243,41 @@ def add_precinct(district_id: str, suffix: str, name: str) -> Precinct:
     save_organization(org)
     precinct_dir(precinct_id).mkdir(parents=True, exist_ok=True)
     return Precinct(id=precinct_id, district_id=district_id, name=name.strip() or precinct_id)
+
+
+def upsert_precinct(precinct_id: str, district_id: str, name: str) -> Precinct:
+    """Add or update a precinct from a remote mesh export."""
+    precinct_id = normalize_id(precinct_id)
+    district_id = normalize_id(district_id)
+    validate_district_id(district_id)
+    if not PRECINCT_ID_RE.match(precinct_id):
+        raise PrecinctStoreError(f"Invalid precinct id: {precinct_id}")
+
+    precinct_name = name.strip() or precinct_id
+    org = load_organization()
+    district_ids = {normalize_id(d["id"]) for d in org.get("districts", [])}
+    if district_id not in district_ids:
+        upsert_district(district_id, district_id)
+        org = load_organization()
+
+    for row in org.get("precincts", []):
+        if normalize_id(row["id"]) == precinct_id:
+            row["district_id"] = district_id
+            row["name"] = precinct_name
+            save_organization(org)
+            precinct_dir(precinct_id).mkdir(parents=True, exist_ok=True)
+            return Precinct(id=precinct_id, district_id=district_id, name=precinct_name)
+
+    org["precincts"].append(
+        {
+            "id": precinct_id,
+            "district_id": district_id,
+            "name": precinct_name,
+        }
+    )
+    save_organization(org)
+    precinct_dir(precinct_id).mkdir(parents=True, exist_ok=True)
+    return Precinct(id=precinct_id, district_id=district_id, name=precinct_name)
 
 
 def remove_precinct(precinct_id: str) -> None:

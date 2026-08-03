@@ -537,6 +537,96 @@ def test_global_pubsub_routing() -> None:
     print("global_pubsub_routing: OK")
 
 
+def test_mesh_data_export(tmp_path) -> None:
+    import config
+    import address_store
+    import csv_store
+    import precinct_store
+    from mesh_data_codec import (
+        MeshDataKind,
+        build_full_export_packets,
+        decode_mesh_data,
+        encode_address_chunks,
+        encode_district,
+        encode_export_end,
+        encode_export_start,
+        encode_precinct,
+    )
+    from receiver import MeshReceiver
+    from text_messages import clear_messages, drain_pending, record_received
+
+    orig_org = config.ORGANIZATION_PATH
+    orig_precincts = config.PRECINCTS_DIR
+    config.ORGANIZATION_PATH = tmp_path / "tx" / "organization.json"
+    config.PRECINCTS_DIR = tmp_path / "tx" / "precincts"
+
+    try:
+        precinct_store.init_organization()
+        precinct_store.add_district("SOUTH", "South District")
+        precinct_store.add_precinct("SOUTH", "01", "South Precinct 01")
+        paths = precinct_store.paths_for_precinct("SOUTH01")
+        csv_store.init_csv(paths.status)
+        address_store.init_addresses(paths.addresses)
+        address_store.update_address("H001", "42 Pine St", path=paths.addresses)
+        csv_store.update_status("H001", "RED", path=paths.status)
+
+        assert decode_mesh_data(encode_export_start()).kind == MeshDataKind.START
+        assert decode_mesh_data(encode_export_end()).kind == MeshDataKind.END
+        district_packet = encode_district("SOUTH", "South District")
+        decoded_district = decode_mesh_data(district_packet)
+        assert decoded_district is not None
+        assert decoded_district.kind == MeshDataKind.DISTRICT
+        assert decoded_district.district_id == "SOUTH"
+
+        address_packets = encode_address_chunks(
+            "SOUTH01",
+            [("H001", "42 Pine St"), ("H002", "99 Elm Avenue")],
+            max_bytes=45,
+        )
+        assert len(address_packets) >= 2
+        decoded_addresses = decode_mesh_data(address_packets[0])
+        assert decoded_addresses is not None
+        assert decoded_addresses.kind == MeshDataKind.ADDRESSES
+        assert decoded_addresses.addresses[0].house_id == "H001"
+
+        packets = build_full_export_packets()
+        assert packets[0].upper().startswith("ND:S:")
+        assert packets[-1].upper().startswith("ND:Z:")
+        assert any("ND:D:SOUTH" in p.upper() for p in packets)
+        assert any("ND:P:SOUTH01" in p.upper() for p in packets)
+        assert any("ND:A:SOUTH01" in p.upper() for p in packets)
+        assert any("NS:SOUTH01:B:" in p.upper() for p in packets)
+
+        clear_messages()
+        assert record_received(encode_district("SOUTH", "South District")) is None
+        assert record_received("Hello operator") is not None
+        clear_messages()
+
+        config.ORGANIZATION_PATH = tmp_path / "rx" / "organization.json"
+        config.PRECINCTS_DIR = tmp_path / "rx" / "precincts"
+        precinct_store.init_organization()
+
+        client = MeshtasticClient()
+        receiver = MeshReceiver(client)
+        for packet in packets:
+            receiver._handle_message(packet)
+
+        assert "SOUTH" in {d.id for d in precinct_store.list_districts()}
+        assert "SOUTH01" in precinct_store.precinct_ids_for_district("SOUTH")
+        recv_paths = precinct_store.paths_for_precinct("SOUTH01")
+        addresses = address_store.read_address_map(recv_paths.addresses)
+        assert addresses.get("H001") == "42 Pine St"
+        rows = csv_store.read_all(recv_paths.status)
+        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
+        assert receiver.stats.import_mode is False
+        assert receiver.stats.data_imports_applied > 0
+    finally:
+        config.ORGANIZATION_PATH = orig_org
+        config.PRECINCTS_DIR = orig_precincts
+
+    print("mesh_data_export: OK")
+
+
 def test_mock_fallback() -> None:
     client = MeshtasticClient()
     info = client.connect()
@@ -572,5 +662,7 @@ if __name__ == "__main__":
     test_node_display_name()
     test_text_message_dispatch()
     test_global_pubsub_routing()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_mesh_data_export(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")

@@ -9,11 +9,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from address_store import apply_remote_addresses
 from config import RECEIVER_POLL_INTERVAL
-from csv_store import apply_remote_update
+from csv_store import apply_remote_update, ensure_status_csv
+from mesh_data_codec import MeshDataKind, MeshDataPacket, decode_mesh_data
 from meshtastic_client import MeshtasticClient
 from packet_codec import decode_updates
-from precinct_store import paths_for_precinct
+from precinct_store import paths_for_precinct, upsert_district, upsert_precinct
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ class ReceiverStats:
     running: bool = False
     packets_received: int = 0
     updates_applied: int = 0
+    data_imports_applied: int = 0
+    import_mode: bool = False
     last_packet: str = ""
     last_update: str = ""
     last_error: str = ""
@@ -92,6 +96,11 @@ class MeshReceiver:
         self.stats.packets_received += 1
         self.stats.last_packet = text
 
+        data_packet = decode_mesh_data(text)
+        if data_packet is not None:
+            self._apply_data_packet(data_packet, text)
+            return
+
         parsed = decode_updates(text)
         if not parsed:
             return
@@ -103,12 +112,17 @@ class MeshReceiver:
                 logger.warning("Ignoring legacy packet without precinct context: %s", text)
                 continue
             precinct_id = precinct_id.upper()
-            if self.watched_precinct_ids and precinct_id not in self.watched_precinct_ids:
+            if (
+                self.watched_precinct_ids
+                and precinct_id not in self.watched_precinct_ids
+                and not self.stats.import_mode
+            ):
                 logger.debug("Ignoring packet for unwatched precinct %s", precinct_id)
                 continue
 
             try:
                 paths = paths_for_precinct(precinct_id)
+                ensure_status_csv(paths.status)
                 row = apply_remote_update(
                     update.house_id,
                     update.status_code,
@@ -130,15 +144,66 @@ class MeshReceiver:
                 )
 
         if applied:
-            self.stats.updates_applied += len(applied)
-            self.stats.last_update = ", ".join(applied)
-            self.stats.last_error = ""
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            self.stats.last_activity_at = now
-            self.stats.recent_activity.appendleft(
-                RecentActivity(
-                    at=now,
-                    packet=text,
-                    summary=", ".join(applied),
+            self._record_activity(text, ", ".join(applied))
+
+    def _apply_data_packet(self, packet: MeshDataPacket, raw_text: str) -> None:
+        summary_parts: list[str] = []
+
+        try:
+            if packet.kind == MeshDataKind.START:
+                self.stats.import_mode = True
+                summary_parts.append("Full data import started")
+            elif packet.kind == MeshDataKind.END:
+                self.stats.import_mode = False
+                summary_parts.append("Full data import complete")
+            elif packet.kind == MeshDataKind.DISTRICT:
+                assert packet.district_id is not None
+                district = upsert_district(packet.district_id, packet.district_name or packet.district_id)
+                summary_parts.append(f"District {district.id}")
+                self.stats.data_imports_applied += 1
+            elif packet.kind == MeshDataKind.PRECINCT:
+                assert packet.precinct_id is not None
+                assert packet.district_id is not None
+                precinct = upsert_precinct(
+                    packet.precinct_id,
+                    packet.district_id,
+                    packet.precinct_name or packet.precinct_id,
                 )
+                summary_parts.append(f"Precinct {precinct.id}")
+                self.stats.data_imports_applied += 1
+            elif packet.kind == MeshDataKind.ADDRESSES:
+                assert packet.precinct_id is not None
+                paths = paths_for_precinct(packet.precinct_id)
+                ensure_status_csv(paths.status)
+                rows = [
+                    {"house_id": entry.house_id, "address": entry.address}
+                    for entry in packet.addresses
+                ]
+                if rows:
+                    result = apply_remote_addresses(rows, path=paths.addresses)
+                    summary_parts.append(
+                        f"{packet.precinct_id} addresses "
+                        f"(+{result['added']}, ~{result['updated']})"
+                    )
+                    self.stats.data_imports_applied += len(rows)
+        except Exception as exc:
+            self.stats.last_error = str(exc)
+            logger.exception("Failed to apply mesh data packet: %s", raw_text)
+            return
+
+        if summary_parts:
+            self._record_activity(raw_text, ", ".join(summary_parts))
+
+    def _record_activity(self, packet: str, summary: str) -> None:
+        self.stats.updates_applied += 1
+        self.stats.last_update = summary
+        self.stats.last_error = ""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.stats.last_activity_at = now
+        self.stats.recent_activity.appendleft(
+            RecentActivity(
+                at=now,
+                packet=packet,
+                summary=summary,
             )
+        )

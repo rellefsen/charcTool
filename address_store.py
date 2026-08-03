@@ -1,4 +1,4 @@
-"""Local house address storage — UI only, never sent over the mesh."""
+"""Local house address storage and mesh import support."""
 
 from __future__ import annotations
 
@@ -240,6 +240,14 @@ def import_addresses(
             )
 
     return {"updated": updated, "added": added, "skipped": skipped}
+
+
+def apply_remote_addresses(
+    rows: list[dict[str, str]],
+    path: Path | None = None,
+) -> dict[str, int]:
+    """Merge addresses received from a mesh export into the local address book."""
+    return import_addresses(rows, path=path, known_house_ids=None)
 
 
 def attach_addresses(

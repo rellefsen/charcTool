@@ -36,6 +36,7 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
+from mesh_data_codec import build_full_export_packets
 from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
@@ -92,6 +93,65 @@ def _create_client(settings: dict) -> MeshtasticClient:
 
 def _sync_packet_delay() -> float:
     return float(st.session_state.app_settings["sync_packet_delay"])
+
+
+def _send_mesh_packets(
+    packets: list[str],
+    *,
+    status_title: str,
+) -> tuple[int, list[str], int]:
+    """Send mesh packets with progress UI. Returns success count, errors, total."""
+    total_packets = len(packets)
+    packet_delay = _sync_packet_delay()
+    est_seconds = max(0, (total_packets - 1) * packet_delay)
+
+    with st.status(status_title, expanded=True) as send_status:
+        if total_packets > 1:
+            st.caption(
+                f"Estimated time: ~{est_seconds:.0f}s "
+                f"({packet_delay:g}s pause between packets for LoRa airtime)"
+            )
+
+        progress = st.progress(0.0, text="Starting mesh send…")
+        detail = st.empty()
+
+        def _on_progress(current: int, total: int) -> None:
+            progress.progress(
+                current / total,
+                text=f"Sending packet {current} of {total}…",
+            )
+            packet_preview = packets[current - 1]
+            detail.markdown(
+                f"**Packet {current}/{total}** — `{packet_preview[:80]}"
+                + ("…" if len(packet_preview) > 80 else "")
+                + "`"
+            )
+
+        def _on_waiting(current: int, total: int, delay: float) -> None:
+            progress.progress(
+                current / total,
+                text=f"Waiting {delay:.0f}s for radio airtime…",
+            )
+            detail.markdown(
+                f"Packet **{current}/{total}** sent. "
+                f"Pausing **{delay:.0f}s** before packet **{current + 1}**."
+            )
+
+        success, errors = st.session_state.client.send_many(
+            packets,
+            delay_seconds=packet_delay,
+            on_progress=_on_progress,
+            on_waiting=_on_waiting if total_packets > 1 else None,
+        )
+
+        if errors:
+            send_status.update(label="Send finished with errors", state="error")
+            progress.progress(1.0, text="Send finished with errors")
+        else:
+            send_status.update(label="Send complete", state="complete")
+            progress.progress(1.0, text="All packets sent")
+
+    return success, errors, total_packets
 
 
 def _active_precinct_id() -> str:
@@ -754,9 +814,54 @@ def _render_sidebar() -> None:
             value=st.session_state.get("force_full_sync", False),
         )
 
+        if st.session_state.mode == "Transmitter":
+            with st.expander("Full data export", expanded=False):
+                st.caption(
+                    "Send **all districts, precincts, addresses, and house statuses** "
+                    "to receiver nodes. Use this to bootstrap a new receiver with your "
+                    "full organization and local data files."
+                )
+                districts = list_districts()
+                precincts = list_precincts()
+                st.caption(
+                    f"Will export **{len(districts)}** district(s) and "
+                    f"**{len(precincts)}** precinct(s)."
+                )
+                if st.button(
+                    "Export all data to mesh",
+                    use_container_width=True,
+                    key="export_all_data_btn",
+                ):
+                    try:
+                        packets = build_full_export_packets()
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        st.stop()
+
+                    total_packets = len(packets)
+                    success, errors, total_packets = _send_mesh_packets(
+                        packets,
+                        status_title=f"Full export: sending {total_packets} packet(s)…",
+                    )
+
+                    st.session_state.last_sync_log = [
+                        f"Full export: {total_packets} packet(s)",
+                        *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(packets[:20])],
+                    ] + (["  …"] if len(packets) > 20 else []) + errors
+
+                    if errors:
+                        st.error(f"Sent {success}/{total_packets} packets — some failed.")
+                    else:
+                        st.success(
+                            f"Full export sent {total_packets} packet(s) to the mesh."
+                        )
+                    st.rerun()
+
         st.divider()
         st.subheader("House management")
-        st.caption("Local board only. Addresses are **never transmitted** over the mesh.")
+        st.caption(
+            "Local board only. Addresses stay local unless you run **Full data export**."
+        )
         paths = _active_paths()
         house_ids = [r["house_id"] for r in read_all(path=paths.status)]
         st.caption(f"**{len(house_ids)}** houses in **{_active_precinct_id()}**")
@@ -1288,7 +1393,13 @@ def _render_receiver_mode() -> None:
     m1.metric("Packets received", stats.packets_received)
     m2.metric("Updates applied", stats.updates_applied)
     m3.metric("Pending changes", len(pending))
-    m4.metric("Listener", "Active" if stats.running else "Stopped")
+    listener_label = "Importing" if stats.import_mode else ("Active" if stats.running else "Stopped")
+    m4.metric("Listener", listener_label)
+
+    if stats.import_mode:
+        st.warning("Receiving full data export — writing organization, addresses, and statuses.")
+    if stats.data_imports_applied:
+        st.caption(f"Data records applied: **{stats.data_imports_applied}**")
 
     if stats.last_update:
         st.info(f"Last mesh update: **{stats.last_update}**")
@@ -1316,7 +1427,7 @@ def _render_receiver_mode() -> None:
         st.subheader(f"Changes since watch started ({len(pending)})")
         st.caption(
             "Status transitions are shown in the **Was → Now** column below. "
-            "Addresses are local only and never sent over the mesh."
+            "Use **Full data export** on the transmitter to send addresses and organization."
         )
         for change in pending:
             label = format_status_change(
