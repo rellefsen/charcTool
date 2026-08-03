@@ -69,6 +69,9 @@ STATUS_URGENCY = {
 # Mesh packet prefix — identifies neighborhood-status messages
 PACKET_PREFIX = "NS"
 
+# Mesh packet prefix — organization/address export (full data sync)
+DATA_PACKET_PREFIX = "ND"
+
 # Default sample houses for first-time setup (60 houses exercises multi-packet bulk sync)
 DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 61)]
 

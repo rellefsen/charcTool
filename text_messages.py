@@ -62,10 +62,11 @@ def record_sent(text: str, from_id: str | None = None) -> TextMessage:
 
 
 def record_received(text: str, from_id: str | None = None) -> TextMessage | None:
+    from mesh_data_codec import is_data_packet
     from packet_codec import is_status_packet
 
     cleaned = text.strip()
-    if not cleaned or is_status_packet(cleaned):
+    if not cleaned or is_status_packet(cleaned) or is_data_packet(cleaned):
         return None
 
     return _enqueue(
