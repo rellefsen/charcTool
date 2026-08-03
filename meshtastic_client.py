@@ -16,7 +16,9 @@ from typing import Callable
 
 from config import (
     EXPORT_ACK_TIMEOUT,
+    EXPORT_ACK_WINDOW,
     EXPORT_MAX_RETRIES,
+    EXPORT_MIN_PACKET_DELAY,
     EXPORT_PACKET_DELAY,
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_PORT,
@@ -408,39 +410,44 @@ class MeshtasticClient:
         payloads: list[str],
         *,
         delay_seconds: float = EXPORT_PACKET_DELAY,
+        min_delay_seconds: float = EXPORT_MIN_PACKET_DELAY,
         ack_timeout_seconds: float = EXPORT_ACK_TIMEOUT,
         max_retries: int = EXPORT_MAX_RETRIES,
+        ack_window: int = EXPORT_ACK_WINDOW,
         on_progress: ProgressCallback | None = None,
-        on_waiting: WaitingCallback | None = None,
         on_ack_wait: Callable[[int, int, int], None] | None = None,
     ) -> tuple[int, list[str]]:
         """
-        Send a full export with per-packet ACKs and retries.
+        Send a full export with windowed ACKs, adaptive delay, and retries.
 
         Returns the number of payload packets acknowledged and any error messages.
         """
-        from mesh_data_codec import encode_export_end, encode_export_index, encode_export_start
+        from mesh_data_codec import (
+            encode_export_ack,
+            encode_export_end,
+            encode_export_start,
+            encode_numbered_export_packet,
+        )
 
         errors: list[str] = []
         acked = 0
         total = len(payloads)
+        window = max(1, int(ack_window))
 
-        ok, detail = self.send_text(encode_export_start(total))
+        ok, detail = self.send_text(encode_export_start(total, window))
         if not ok:
             return 0, [detail]
 
-        if delay_seconds > 0:
-            time.sleep(delay_seconds)
-
-        for seq, payload in enumerate(payloads, start=1):
-            if on_progress:
-                on_progress(seq, total)
+        seq = 0
+        while seq < total:
+            window_end = min(seq + window, total)
 
             acknowledged = False
             for attempt in range(1, max_retries + 1):
-                from mesh_data_codec import encode_export_ack
-
-                expected_ack = encode_export_ack(seq, total).upper()
+                inter_delay = (
+                    min_delay_seconds if attempt == 1 else delay_seconds
+                )
+                expected_ack = encode_export_ack(window_end, total).upper()
                 ack_event = threading.Event()
 
                 def _on_ack(text: str, from_id: str | None = None) -> None:
@@ -450,33 +457,41 @@ class MeshtasticClient:
 
                 self.register_receive_callback(_on_ack)
                 try:
-                    ok, detail = self.send_text(encode_export_index(seq, total))
-                    if not ok:
-                        errors.append(f"Packet {seq}/{total} index: {detail}")
-                        break
+                    for current in range(seq + 1, window_end + 1):
+                        if on_progress:
+                            on_progress(current, total)
 
-                    if delay_seconds > 0:
-                        time.sleep(min(delay_seconds, 1.0))
+                        numbered = encode_numbered_export_packet(
+                            current,
+                            total,
+                            payloads[current - 1],
+                        )
+                        ok, detail = self.send_text(numbered)
+                        if not ok:
+                            errors.append(f"Packet {current}/{total} send: {detail}")
+                            break
 
-                    ok, detail = self.send_text(payload)
-                    if not ok:
-                        errors.append(f"Packet {seq}/{total} send: {detail}")
-                        break
+                        if inter_delay > 0 and current < window_end:
+                            time.sleep(inter_delay)
+                    else:
+                        if on_ack_wait:
+                            on_ack_wait(window_end, total, attempt)
 
-                    if on_ack_wait:
-                        on_ack_wait(seq, total, attempt)
-
-                    if ack_event.wait(ack_timeout_seconds):
-                        acknowledged = True
-                        acked += 1
-                        break
+                        if ack_event.wait(ack_timeout_seconds):
+                            acknowledged = True
+                            acked += window_end - seq
+                            seq = window_end
+                            break
                 finally:
                     self.unregister_receive_callback(_on_ack)
 
+                if acknowledged:
+                    break
+
                 if attempt < max_retries:
                     logger.warning(
-                        "No ACK for export packet %s/%s (attempt %s/%s)",
-                        seq,
+                        "No ACK for export window ending at %s/%s (attempt %s/%s)",
+                        window_end,
                         total,
                         attempt,
                         max_retries,
@@ -485,13 +500,12 @@ class MeshtasticClient:
                         time.sleep(delay_seconds)
                 else:
                     errors.append(
-                        f"No ACK for packet {seq}/{total} after {max_retries} attempts"
+                        f"No ACK for window ending at packet {window_end}/{total} "
+                        f"after {max_retries} attempts"
                     )
 
-            if delay_seconds > 0 and seq < total:
-                if on_waiting:
-                    on_waiting(seq, total, delay_seconds)
-                time.sleep(delay_seconds)
+            if not acknowledged:
+                break
 
         ok, detail = self.send_text(encode_export_end())
         if not ok:

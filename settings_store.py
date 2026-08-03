@@ -10,7 +10,9 @@ from config import (
     DEFAULT_DISTRICT_ID,
     DEFAULT_PRECINCT_ID,
     EXPORT_ACK_TIMEOUT,
+    EXPORT_ACK_WINDOW,
     EXPORT_MAX_RETRIES,
+    EXPORT_MIN_PACKET_DELAY,
     EXPORT_PACKET_DELAY,
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_PORT,
@@ -27,6 +29,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "export_packet_delay": EXPORT_PACKET_DELAY,
     "export_ack_timeout": EXPORT_ACK_TIMEOUT,
     "export_max_retries": EXPORT_MAX_RETRIES,
+    "export_ack_window": EXPORT_ACK_WINDOW,
+    "export_min_packet_delay": EXPORT_MIN_PACKET_DELAY,
     "active_precinct_id": DEFAULT_PRECINCT_ID,
     "active_district_id": DEFAULT_DISTRICT_ID,
     "show_mock_testing": True,
@@ -74,6 +78,17 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise SettingsError("Export max retries must be a whole number.") from exc
 
+    try:
+        settings["export_ack_window"] = int(raw.get("export_ack_window", settings["export_ack_window"]))
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("Export ACK window must be a whole number.") from exc
+
+    export_min_delay = raw.get("export_min_packet_delay", settings["export_min_packet_delay"])
+    try:
+        settings["export_min_packet_delay"] = float(export_min_delay)
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("Export minimum delay must be a number.") from exc
+
     precinct = str(raw.get("active_precinct_id", settings["active_precinct_id"])).strip().upper()
     district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()
     settings["active_precinct_id"] = precinct or DEFAULT_PRECINCT_ID
@@ -112,6 +127,18 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise SettingsError("Export max retries must be at least 1.")
     if retries > 10:
         raise SettingsError("Export max retries must be 10 or less.")
+
+    ack_window = int(settings["export_ack_window"])
+    if ack_window < 1:
+        raise SettingsError("Export ACK window must be at least 1.")
+    if ack_window > 20:
+        raise SettingsError("Export ACK window must be 20 or less.")
+
+    min_delay = float(settings["export_min_packet_delay"])
+    if min_delay < 0:
+        raise SettingsError("Export minimum delay cannot be negative.")
+    if min_delay > export_delay:
+        raise SettingsError("Export minimum delay cannot exceed export delay.")
 
 
 def load_settings() -> dict[str, Any]:
