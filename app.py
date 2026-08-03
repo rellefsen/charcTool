@@ -221,6 +221,7 @@ def _configure_receiver() -> None:
 
 
 def _ensure_receiver_view_state() -> None:
+    """Initialize receiver view keys before sidebar widgets are drawn."""
     districts = list_districts()
     precincts = list_precincts()
     if not districts or not precincts:
@@ -229,30 +230,34 @@ def _ensure_receiver_view_state() -> None:
     district_ids = [d.id for d in districts]
     precinct_ids = [p.id for p in precincts]
 
-    if st.session_state.get("receiver_view_scope") not in {"district", "precinct"}:
+    if "receiver_view_scope" not in st.session_state:
         st.session_state.receiver_view_scope = "district"
 
-    current_district = str(
-        st.session_state.get("receiver_display_district_id", district_ids[0])
-    ).upper()
-    if current_district not in district_ids:
-        current_district = district_ids[0]
-    st.session_state.receiver_display_district_id = current_district
+    if "receiver_display_district_id" not in st.session_state:
+        st.session_state.receiver_display_district_id = district_ids[0]
+    elif st.session_state.receiver_display_district_id not in district_ids:
+        st.session_state.receiver_display_district_id = district_ids[0]
 
-    current_precinct = str(
-        st.session_state.get("receiver_display_precinct_id", precinct_ids[0])
-    ).upper()
-    if current_precinct not in precinct_ids:
-        current_precinct = precinct_ids[0]
-    st.session_state.receiver_display_precinct_id = current_precinct
+    if "receiver_display_precinct_id" not in st.session_state:
+        st.session_state.receiver_display_precinct_id = precinct_ids[0]
+    elif st.session_state.receiver_display_precinct_id not in precinct_ids:
+        st.session_state.receiver_display_precinct_id = precinct_ids[0]
 
 
 def _receiver_display_district_id() -> str:
-    return str(st.session_state.receiver_display_district_id).upper()
+    district_ids = [d.id for d in list_districts()]
+    if not district_ids:
+        return ""
+    current = str(st.session_state.get("receiver_display_district_id", district_ids[0])).upper()
+    return current if current in district_ids else district_ids[0]
 
 
 def _receiver_display_precinct_id() -> str:
-    return str(st.session_state.receiver_display_precinct_id).upper()
+    precinct_ids = [p.id for p in list_precincts()]
+    if not precinct_ids:
+        return ""
+    current = str(st.session_state.get("receiver_display_precinct_id", precinct_ids[0])).upper()
+    return current if current in precinct_ids else precinct_ids[0]
 
 
 def _read_precinct_rows(precinct_id: str) -> list[dict]:
@@ -1474,14 +1479,12 @@ def _render_receiver_mode() -> None:
     if stats.import_complete_pending:
         stats.import_complete_pending = False
         _configure_receiver()
-        _ensure_receiver_view_state()
         st.session_state.pop("receiver_baseline", None)
         st.success(
             "Mesh import complete. Organization and data files were updated — "
             "use **Board view** in the sidebar to switch district or precinct."
         )
 
-    _ensure_receiver_view_state()
     if st.session_state.receiver_view_scope == "precinct":
         precinct = get_precinct(_receiver_display_precinct_id())
         view_label = (
