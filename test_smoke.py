@@ -538,6 +538,8 @@ def test_global_pubsub_routing() -> None:
 
 
 def test_mesh_data_export(tmp_path) -> None:
+    import time
+
     import config
     import address_store
     import csv_store
@@ -620,11 +622,43 @@ def test_mesh_data_export(tmp_path) -> None:
         assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
         assert receiver.stats.import_mode is False
         assert receiver.stats.data_imports_applied > 0
+
+        # Status packets can arrive after the end marker on lossy mesh links.
+        receiver.stats.import_mode = False
+        receiver.stats.import_grace_until = time.time() + 300
+        receiver._handle_message("NS:SOUTH01:B:H001R,H002Y")
+        rows = csv_store.read_all(recv_paths.status)
+        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
+        assert any(r["house_id"] == "H002" and r["status_code"] == "YELLOW" for r in rows)
     finally:
         config.ORGANIZATION_PATH = orig_org
         config.PRECINCTS_DIR = orig_precincts
 
     print("mesh_data_export: OK")
+
+
+def test_ensure_precinct_from_import(tmp_path) -> None:
+    import config
+    import precinct_store
+
+    orig_org = config.ORGANIZATION_PATH
+    orig_precincts = config.PRECINCTS_DIR
+    config.ORGANIZATION_PATH = tmp_path / "organization.json"
+    config.PRECINCTS_DIR = tmp_path / "precincts"
+
+    try:
+        precinct_store.init_organization()
+        precinct = precinct_store.ensure_precinct_from_import("SOUTH01")
+        assert precinct.id == "SOUTH01"
+        assert precinct.district_id == "SOUTH"
+        assert "SOUTH" in {d.id for d in precinct_store.list_districts()}
+        assert "SOUTH01" in precinct_store.precinct_ids_for_district("SOUTH")
+        assert precinct_store.infer_district_id("CHARC02") == "CHARC"
+    finally:
+        config.ORGANIZATION_PATH = orig_org
+        config.PRECINCTS_DIR = orig_precincts
+
+    print("ensure_precinct_from_import: OK")
 
 
 def test_mock_fallback() -> None:
@@ -664,5 +698,6 @@ if __name__ == "__main__":
     test_global_pubsub_routing()
     with tempfile.TemporaryDirectory() as tmp:
         test_mesh_data_export(Path(tmp))
+        test_ensure_precinct_from_import(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")

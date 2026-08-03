@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -579,6 +580,17 @@ def _render_sidebar() -> None:
                 f"Listening for **{len(watched)}** precinct(s): "
                 + ", ".join(p.id for p in watched)
             )
+
+        with st.expander("Organization overview", expanded=False):
+            for district in list_districts():
+                st.markdown(f"**{district.id}** — {district.name}")
+                district_precincts = list_precincts(district.id)
+                if district_precincts:
+                    st.caption(
+                        ", ".join(f"{p.id} ({p.name})" for p in district_precincts)
+                    )
+                else:
+                    st.caption("No precincts")
 
         with st.expander("Add district", expanded=False):
             new_district_id = st.text_input(
@@ -1372,6 +1384,18 @@ def _render_text_messages() -> None:
 
 
 def _render_receiver_mode() -> None:
+    receiver: MeshReceiver = st.session_state.receiver
+    stats = receiver.stats
+
+    if stats.import_complete_pending:
+        stats.import_complete_pending = False
+        _configure_receiver()
+        st.session_state.pop("receiver_baseline", None)
+        st.success(
+            "Mesh import complete. Organization and data files were updated — "
+            "select the new district under **Active district** in the sidebar if needed."
+        )
+
     district_id = _active_district_id()
     districts = {d.id: d.name for d in list_districts()}
     district_label = f"{district_id} — {districts.get(district_id, district_id)}"
@@ -1380,10 +1404,7 @@ def _render_receiver_mode() -> None:
     st.caption(f"District: **{district_label}**")
     st.caption("Listening for mesh updates and refreshing the status board.")
 
-    receiver: MeshReceiver = st.session_state.receiver
     _restart_receiver_if_needed()
-
-    stats = receiver.stats
     rows = _read_district_rows(district_id)
     _ensure_receiver_baseline(rows)
     baseline = st.session_state.receiver_baseline
@@ -1396,8 +1417,11 @@ def _render_receiver_mode() -> None:
     listener_label = "Importing" if stats.import_mode else ("Active" if stats.running else "Stopped")
     m4.metric("Listener", listener_label)
 
-    if stats.import_mode:
-        st.warning("Receiving full data export — writing organization, addresses, and statuses.")
+    if stats.import_mode or stats.import_grace_until > 0:
+        if stats.import_mode:
+            st.warning("Receiving full data export — writing organization, addresses, and statuses.")
+        elif stats.import_grace_until > time.time():
+            st.info("Finishing import — still accepting late-arriving status packets.")
     if stats.data_imports_applied:
         st.caption(f"Data records applied: **{stats.data_imports_applied}**")
 

@@ -220,6 +220,42 @@ def upsert_district(district_id: str, name: str) -> District:
     return District(id=district_id, name=district_name)
 
 
+def infer_district_id(precinct_id: str) -> str:
+    """Best-effort district id from a precinct id like SOUTH01 or CHARC01."""
+    precinct_id = normalize_id(precinct_id)
+    org = load_organization()
+    best_match: str | None = None
+    for row in org.get("districts", []):
+        did = normalize_id(row["id"])
+        if precinct_id.startswith(did) and (
+            best_match is None or len(did) > len(best_match)
+        ):
+            best_match = did
+    if best_match:
+        return best_match
+
+    for length in range(len(precinct_id) - 2, 1, -1):
+        candidate = precinct_id[:length]
+        suffix = precinct_id[length:]
+        if DISTRICT_ID_RE.match(candidate) and PRECINCT_SUFFIX_RE.match(suffix):
+            return candidate
+
+    raise PrecinctStoreError(f"Cannot infer district for precinct {precinct_id}")
+
+
+def ensure_precinct_from_import(precinct_id: str) -> Precinct:
+    """Ensure organization entries exist when import packets arrive out of order."""
+    precinct_id = normalize_id(precinct_id)
+    existing = get_precinct(precinct_id)
+    if existing:
+        return existing
+
+    district_id = infer_district_id(precinct_id)
+    if district_id not in {d.id for d in list_districts()}:
+        upsert_district(district_id, district_id)
+    return upsert_precinct(precinct_id, district_id, precinct_id)
+
+
 def add_precinct(district_id: str, suffix: str, name: str) -> Precinct:
     district_id = normalize_id(district_id)
     validate_district_id(district_id)
