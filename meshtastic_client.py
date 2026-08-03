@@ -14,7 +14,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-from config import MESHTASTIC_CHANNEL_NAME, MESHTASTIC_PORT, SYNC_PACKET_DELAY
+from config import (
+    EXPORT_ACK_TIMEOUT,
+    EXPORT_MAX_RETRIES,
+    EXPORT_PACKET_DELAY,
+    MESHTASTIC_CHANNEL_NAME,
+    MESHTASTIC_PORT,
+    SYNC_PACKET_DELAY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,27 +315,33 @@ class MeshtasticClient:
             info = self.connect()
             if info.mock_mode:
                 logger.info("[MOCK TX %s] %s", self.channel_name, text)
-                self.dispatch_message(text, self.local_node_id())
-                return True, f"Mock transmit on {self.channel_name}: {text}"
-
-            if self._channel_index is None:
+                from_id = self.local_node_id()
+            elif self._channel_index is None:
                 msg = f"Cannot send — channel '{self.channel_name}' not found on radio"
                 logger.error(msg)
                 return False, msg
+            else:
+                from_id = None
+                try:
+                    assert self._interface is not None
+                    self._interface.sendText(
+                        text,
+                        wantAck=False,
+                        channelIndex=self._channel_index,
+                    )
+                    logger.info("[TX ch=%s] %s", self.channel_name, text)
+                    return True, f"Sent on {self.channel_name}: {text}"
+                except Exception as exc:
+                    logger.error("Send failed: %s", exc)
+                    self._reset_connection()
+                    return False, f"Send failed: {exc}"
 
-            try:
-                assert self._interface is not None
-                self._interface.sendText(
-                    text,
-                    wantAck=False,
-                    channelIndex=self._channel_index,
-                )
-                logger.info("[TX ch=%s] %s", self.channel_name, text)
-                return True, f"Sent on {self.channel_name}: {text}"
-            except Exception as exc:
-                logger.error("Send failed: %s", exc)
-                self._reset_connection()
-                return False, f"Send failed: {exc}"
+        if info.mock_mode:
+            # Dispatch outside the lock so receive handlers can send replies (e.g. export ACKs).
+            self.dispatch_message(text, from_id)
+            return True, f"Mock transmit on {self.channel_name}: {text}"
+
+        return False, "Unexpected send state"
 
     def reconnect(self) -> ConnectionInfo:
         """Close any existing session and attempt a fresh radio connection."""
@@ -366,6 +379,125 @@ class MeshtasticClient:
                 time.sleep(delay_seconds)
 
         return success, errors
+
+    def wait_for_export_ack(
+        self,
+        seq: int,
+        total: int,
+        timeout_seconds: float = EXPORT_ACK_TIMEOUT,
+    ) -> bool:
+        """Block until the matching export ACK arrives or the timeout expires."""
+        from mesh_data_codec import encode_export_ack
+
+        expected = encode_export_ack(seq, total).upper()
+        event = threading.Event()
+
+        def _on_ack(text: str, from_id: str | None = None) -> None:
+            del from_id
+            if text.strip().upper() == expected:
+                event.set()
+
+        self.register_receive_callback(_on_ack)
+        try:
+            return event.wait(timeout_seconds)
+        finally:
+            self.unregister_receive_callback(_on_ack)
+
+    def send_export_with_acks(
+        self,
+        payloads: list[str],
+        *,
+        delay_seconds: float = EXPORT_PACKET_DELAY,
+        ack_timeout_seconds: float = EXPORT_ACK_TIMEOUT,
+        max_retries: int = EXPORT_MAX_RETRIES,
+        on_progress: ProgressCallback | None = None,
+        on_waiting: WaitingCallback | None = None,
+        on_ack_wait: Callable[[int, int, int], None] | None = None,
+    ) -> tuple[int, list[str]]:
+        """
+        Send a full export with per-packet ACKs and retries.
+
+        Returns the number of payload packets acknowledged and any error messages.
+        """
+        from mesh_data_codec import encode_export_end, encode_export_index, encode_export_start
+
+        errors: list[str] = []
+        acked = 0
+        total = len(payloads)
+
+        ok, detail = self.send_text(encode_export_start(total))
+        if not ok:
+            return 0, [detail]
+
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+        for seq, payload in enumerate(payloads, start=1):
+            if on_progress:
+                on_progress(seq, total)
+
+            acknowledged = False
+            for attempt in range(1, max_retries + 1):
+                from mesh_data_codec import encode_export_ack
+
+                expected_ack = encode_export_ack(seq, total).upper()
+                ack_event = threading.Event()
+
+                def _on_ack(text: str, from_id: str | None = None) -> None:
+                    del from_id
+                    if text.strip().upper() == expected_ack:
+                        ack_event.set()
+
+                self.register_receive_callback(_on_ack)
+                try:
+                    ok, detail = self.send_text(encode_export_index(seq, total))
+                    if not ok:
+                        errors.append(f"Packet {seq}/{total} index: {detail}")
+                        break
+
+                    if delay_seconds > 0:
+                        time.sleep(min(delay_seconds, 1.0))
+
+                    ok, detail = self.send_text(payload)
+                    if not ok:
+                        errors.append(f"Packet {seq}/{total} send: {detail}")
+                        break
+
+                    if on_ack_wait:
+                        on_ack_wait(seq, total, attempt)
+
+                    if ack_event.wait(ack_timeout_seconds):
+                        acknowledged = True
+                        acked += 1
+                        break
+                finally:
+                    self.unregister_receive_callback(_on_ack)
+
+                if attempt < max_retries:
+                    logger.warning(
+                        "No ACK for export packet %s/%s (attempt %s/%s)",
+                        seq,
+                        total,
+                        attempt,
+                        max_retries,
+                    )
+                    if delay_seconds > 0:
+                        time.sleep(delay_seconds)
+                else:
+                    errors.append(
+                        f"No ACK for packet {seq}/{total} after {max_retries} attempts"
+                    )
+
+            if delay_seconds > 0 and seq < total:
+                if on_waiting:
+                    on_waiting(seq, total, delay_seconds)
+                time.sleep(delay_seconds)
+
+        ok, detail = self.send_text(encode_export_end())
+        if not ok:
+            errors.append(detail)
+
+        return acked, errors
 
     def register_receive_callback(self, callback: ReceiveCallback) -> None:
         if callback not in self._receive_callbacks:
