@@ -205,12 +205,69 @@ def _switch_context_after_district_removed(removed_id: str) -> None:
 
 
 def _configure_receiver() -> None:
-    district_id = _active_district_id()
-    precincts = list_precincts(district_id)
-    st.session_state.receiver.watched_precinct_ids = precinct_ids_for_district(district_id)
+    """Listen for mesh updates on every precinct in the organization."""
+    all_precincts = list_precincts()
+    st.session_state.receiver.watched_precinct_ids = {p.id for p in all_precincts}
+    single_precinct_districts = [
+        district_id
+        for district_id in {p.district_id for p in all_precincts}
+        if len(list_precincts(district_id)) == 1
+    ]
     st.session_state.receiver.legacy_precinct_id = (
-        precincts[0].id if len(precincts) == 1 else None
+        list_precincts(single_precinct_districts[0])[0].id
+        if len(single_precinct_districts) == 1
+        else None
     )
+
+
+def _ensure_receiver_view_state() -> None:
+    districts = list_districts()
+    precincts = list_precincts()
+    if not districts or not precincts:
+        return
+
+    district_ids = [d.id for d in districts]
+    precinct_ids = [p.id for p in precincts]
+
+    if st.session_state.get("receiver_view_scope") not in {"district", "precinct"}:
+        st.session_state.receiver_view_scope = "district"
+
+    current_district = str(
+        st.session_state.get("receiver_display_district_id", district_ids[0])
+    ).upper()
+    if current_district not in district_ids:
+        current_district = district_ids[0]
+    st.session_state.receiver_display_district_id = current_district
+
+    current_precinct = str(
+        st.session_state.get("receiver_display_precinct_id", precinct_ids[0])
+    ).upper()
+    if current_precinct not in precinct_ids:
+        current_precinct = precinct_ids[0]
+    st.session_state.receiver_display_precinct_id = current_precinct
+
+
+def _receiver_display_district_id() -> str:
+    return str(st.session_state.receiver_display_district_id).upper()
+
+
+def _receiver_display_precinct_id() -> str:
+    return str(st.session_state.receiver_display_precinct_id).upper()
+
+
+def _read_precinct_rows(precinct_id: str) -> list[dict]:
+    paths = paths_for_precinct(precinct_id)
+    paths.status.parent.mkdir(parents=True, exist_ok=True)
+    ensure_status_csv(paths.status)
+    return [{**row, "precinct_id": precinct_id} for row in read_all(path=paths.status)]
+
+
+def _read_receiver_view_rows() -> list[dict]:
+    if st.session_state.receiver_view_scope == "precinct":
+        rows = _read_precinct_rows(_receiver_display_precinct_id())
+    else:
+        rows = _read_district_rows(_receiver_display_district_id())
+    return sort_rows_by_urgency(rows)
 
 
 def _restart_receiver_if_needed() -> None:
@@ -557,28 +614,55 @@ def _render_sidebar() -> None:
                 _configure_receiver()
                 st.rerun()
         else:
+            _ensure_receiver_view_state()
             districts = list_districts()
             district_labels = {d.id: f"{d.id} — {d.name}" for d in districts}
-            current_district = _active_district_id()
+            precincts = list_precincts()
+            precinct_labels = {p.id: f"{p.id} — {p.name}" for p in precincts}
             district_ids = [d.id for d in districts]
-            selected_district = st.selectbox(
-                "Active district",
-                district_ids,
-                index=district_ids.index(current_district)
-                if current_district in district_ids
-                else 0,
-                format_func=lambda did: district_labels.get(did, did),
-                help="Receiver aggregates all precinct CSVs in the selected district.",
+            precinct_ids = [p.id for p in precincts]
+
+            view_scope = st.radio(
+                "Board view",
+                ["district", "precinct"],
+                index=0 if st.session_state.receiver_view_scope == "district" else 1,
+                format_func=lambda scope: "Whole district" if scope == "district" else "Single precinct",
+                help="Controls the main board display only. The listener always watches every precinct.",
+                horizontal=True,
+                key="receiver_view_scope",
             )
-            if selected_district != current_district:
-                _save_context_settings(active_district_id=selected_district)
+            if view_scope != st.session_state.get("_receiver_view_scope_prev", view_scope):
                 st.session_state.pop("receiver_baseline", None)
-                _configure_receiver()
-                st.rerun()
-            watched = list_precincts(selected_district)
+            st.session_state._receiver_view_scope_prev = view_scope
+
+            if st.session_state.receiver_view_scope == "district":
+                previous_district = _receiver_display_district_id()
+                st.selectbox(
+                    "View district",
+                    district_ids,
+                    format_func=lambda did: district_labels.get(did, did),
+                    help="Show all precincts in this district on the main board.",
+                    key="receiver_display_district_id",
+                )
+                if _receiver_display_district_id() != previous_district:
+                    st.session_state.pop("receiver_baseline", None)
+                    st.rerun()
+            else:
+                previous_precinct = _receiver_display_precinct_id()
+                st.selectbox(
+                    "View precinct",
+                    precinct_ids,
+                    format_func=lambda pid: precinct_labels.get(pid, pid),
+                    help="Show one precinct on the main board.",
+                    key="receiver_display_precinct_id",
+                )
+                if _receiver_display_precinct_id() != previous_precinct:
+                    st.session_state.pop("receiver_baseline", None)
+                    st.rerun()
+
             st.caption(
-                f"Listening for **{len(watched)}** precinct(s): "
-                + ", ".join(p.id for p in watched)
+                f"Listening for **{len(precincts)}** precinct(s) across "
+                f"**{len(districts)}** district(s)."
             )
 
         with st.expander("Organization overview", expanded=False):
@@ -1390,22 +1474,34 @@ def _render_receiver_mode() -> None:
     if stats.import_complete_pending:
         stats.import_complete_pending = False
         _configure_receiver()
+        _ensure_receiver_view_state()
         st.session_state.pop("receiver_baseline", None)
         st.success(
             "Mesh import complete. Organization and data files were updated — "
-            "select the new district under **Active district** in the sidebar if needed."
+            "use **Board view** in the sidebar to switch district or precinct."
         )
 
-    district_id = _active_district_id()
-    districts = {d.id: d.name for d in list_districts()}
-    district_label = f"{district_id} — {districts.get(district_id, district_id)}"
+    _ensure_receiver_view_state()
+    if st.session_state.receiver_view_scope == "precinct":
+        precinct = get_precinct(_receiver_display_precinct_id())
+        view_label = (
+            f"{precinct.id} — {precinct.name}"
+            if precinct
+            else _receiver_display_precinct_id()
+        )
+        board_title = f"Precinct board ({view_label})"
+    else:
+        district_id = _receiver_display_district_id()
+        districts = {d.id: d.name for d in list_districts()}
+        view_label = f"{district_id} — {districts.get(district_id, district_id)}"
+        board_title = f"District board ({view_label})"
 
     st.title("📥 Receiver Mode")
-    st.caption(f"District: **{district_label}**")
-    st.caption("Listening for mesh updates and refreshing the status board.")
+    st.caption(f"Viewing: **{view_label}**")
+    st.caption("Listening for mesh updates on all precincts and refreshing the board.")
 
     _restart_receiver_if_needed()
-    rows = _read_district_rows(district_id)
+    rows = _read_receiver_view_rows()
     _ensure_receiver_baseline(rows)
     baseline = st.session_state.receiver_baseline
     pending = _compute_district_changes(rows, baseline)
@@ -1471,18 +1567,23 @@ def _render_receiver_mode() -> None:
                     unsafe_allow_html=True,
                 )
 
+    show_precinct = st.session_state.receiver_view_scope == "district"
     st.divider()
-    st.subheader(f"District board ({len(rows)} houses)")
+    st.subheader(f"{board_title} ({len(rows)} houses)")
     st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
     _render_print_board_actions(
         rows,
-        title="District Status Board",
-        subtitle=f"District: {district_label}",
-        file_stem=district_id,
-        show_precinct=True,
+        title="Receiver Status Board",
+        subtitle=f"View: {view_label}",
+        file_stem=(
+            _receiver_display_precinct_id()
+            if st.session_state.receiver_view_scope == "precinct"
+            else _receiver_display_district_id()
+        ),
+        show_precinct=show_precinct,
         change_labels=change_labels,
     )
-    _render_readonly_board(rows, change_labels=change_labels, show_precinct=True)
+    _render_readonly_board(rows, change_labels=change_labels, show_precinct=show_precinct)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
     c1, c2, c3 = st.columns(3)
@@ -1491,8 +1592,6 @@ def _render_receiver_mode() -> None:
     c3.metric("🟢 GREEN", counts.get("GREEN", 0))
 
     st.caption("Auto-refreshing every 2 seconds…")
-    import time
-
     time.sleep(2)
     st.rerun()
 
