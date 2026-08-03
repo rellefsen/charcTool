@@ -37,7 +37,7 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
-from mesh_data_codec import build_full_export_packets
+from mesh_data_codec import build_full_export_payloads
 from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
@@ -94,6 +94,82 @@ def _create_client(settings: dict) -> MeshtasticClient:
 
 def _sync_packet_delay() -> float:
     return float(st.session_state.app_settings["sync_packet_delay"])
+
+
+def _export_packet_delay() -> float:
+    return float(st.session_state.app_settings.get("export_packet_delay", 4.0))
+
+
+def _export_ack_timeout() -> float:
+    return float(st.session_state.app_settings.get("export_ack_timeout", 15.0))
+
+
+def _export_max_retries() -> int:
+    return int(st.session_state.app_settings.get("export_max_retries", 3))
+
+
+def _send_export_with_acks(payloads: list[str]) -> tuple[int, list[str], int]:
+    """Send a full export with ACK/retry. Returns acked count, errors, total payloads."""
+    total = len(payloads)
+    delay = _export_packet_delay()
+    ack_timeout = _export_ack_timeout()
+    max_retries = _export_max_retries()
+    est_seconds = total * (delay + ack_timeout * 0.5)
+
+    with st.status(
+        f"Full export: sending {total} payload packet(s) with ACK/retry…",
+        expanded=True,
+    ) as send_status:
+        st.caption(
+            f"Estimated time: ~{est_seconds:.0f}s "
+            f"({delay:g}s between packets, {ack_timeout:g}s ACK timeout, "
+            f"up to {max_retries} retries)"
+        )
+        progress = st.progress(0.0, text="Starting export…")
+        detail = st.empty()
+
+        def _on_progress(current: int, total_count: int) -> None:
+            progress.progress(
+                current / total_count,
+                text=f"Payload {current} of {total_count}…",
+            )
+            packet_preview = payloads[current - 1]
+            detail.markdown(
+                f"**Payload {current}/{total_count}** — `{packet_preview[:80]}"
+                + ("…" if len(packet_preview) > 80 else "")
+                + "`"
+            )
+
+        def _on_waiting(current: int, total_count: int, wait_delay: float) -> None:
+            progress.progress(
+                current / total_count,
+                text=f"Waiting {wait_delay:.0f}s for radio airtime…",
+            )
+
+        def _on_ack_wait(seq: int, total_count: int, attempt: int) -> None:
+            progress.progress(
+                seq / total_count,
+                text=f"Waiting for ACK {seq}/{total_count} (attempt {attempt})…",
+            )
+
+        acked, errors = st.session_state.client.send_export_with_acks(
+            payloads,
+            delay_seconds=delay,
+            ack_timeout_seconds=ack_timeout,
+            max_retries=max_retries,
+            on_progress=_on_progress,
+            on_waiting=_on_waiting if total > 1 else None,
+            on_ack_wait=_on_ack_wait,
+        )
+
+        if errors:
+            send_status.update(label="Export finished with errors", state="error")
+            progress.progress(1.0, text="Export finished with errors")
+        else:
+            send_status.update(label="Export complete", state="complete")
+            progress.progress(1.0, text="All payloads acknowledged")
+
+    return acked, errors, total
 
 
 def _send_mesh_packets(
@@ -928,33 +1004,74 @@ def _render_sidebar() -> None:
                     f"Will export **{len(districts)}** district(s) and "
                     f"**{len(precincts)}** precinct(s)."
                 )
+                st.caption(
+                    "Each payload waits for a receiver ACK and retries on timeout."
+                )
+                export_delay = st.number_input(
+                    "Export packet delay (seconds)",
+                    min_value=0.0,
+                    max_value=60.0,
+                    step=0.5,
+                    value=float(
+                        st.session_state.app_settings.get("export_packet_delay", 4.0)
+                    ),
+                    help="Pause between export packets so LoRa can finish transmitting.",
+                    key="export_packet_delay_input",
+                )
+                export_ack_timeout = st.number_input(
+                    "Export ACK timeout (seconds)",
+                    min_value=1.0,
+                    max_value=120.0,
+                    step=1.0,
+                    value=float(
+                        st.session_state.app_settings.get("export_ack_timeout", 15.0)
+                    ),
+                    help="How long to wait for the receiver to ACK each payload.",
+                    key="export_ack_timeout_input",
+                )
+                export_max_retries = st.number_input(
+                    "Export max retries",
+                    min_value=1,
+                    max_value=10,
+                    step=1,
+                    value=int(st.session_state.app_settings.get("export_max_retries", 3)),
+                    help="How many times to resend a payload if no ACK arrives.",
+                    key="export_max_retries_input",
+                )
                 if st.button(
                     "Export all data to mesh",
                     use_container_width=True,
                     key="export_all_data_btn",
                 ):
+                    _save_context_settings(
+                        export_packet_delay=export_delay,
+                        export_ack_timeout=export_ack_timeout,
+                        export_max_retries=int(export_max_retries),
+                    )
                     try:
-                        packets = build_full_export_packets()
+                        payloads = build_full_export_payloads()
                     except ValueError as exc:
                         st.error(str(exc))
                         st.stop()
 
-                    total_packets = len(packets)
-                    success, errors, total_packets = _send_mesh_packets(
-                        packets,
-                        status_title=f"Full export: sending {total_packets} packet(s)…",
-                    )
+                    if not payloads:
+                        st.warning("Nothing to export.")
+                        st.stop()
+
+                    acked, errors, total_payloads = _send_export_with_acks(payloads)
 
                     st.session_state.last_sync_log = [
-                        f"Full export: {total_packets} packet(s)",
-                        *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(packets[:20])],
-                    ] + (["  …"] if len(packets) > 20 else []) + errors
+                        f"Full export: {acked}/{total_payloads} payload(s) acknowledged",
+                        *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(payloads[:20])],
+                    ] + (["  …"] if len(payloads) > 20 else []) + errors
 
                     if errors:
-                        st.error(f"Sent {success}/{total_packets} packets — some failed.")
+                        st.error(
+                            f"Acknowledged {acked}/{total_payloads} payload(s) — some failed."
+                        )
                     else:
                         st.success(
-                            f"Full export sent {total_packets} packet(s) to the mesh."
+                            f"Full export complete — {acked}/{total_payloads} payload(s) acknowledged."
                         )
                     st.rerun()
 

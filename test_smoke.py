@@ -637,6 +637,85 @@ def test_mesh_data_export(tmp_path) -> None:
     print("mesh_data_export: OK")
 
 
+def test_export_ack_retry(tmp_path) -> None:
+    import config
+    import address_store
+    import csv_store
+    import precinct_store
+    from mesh_data_codec import (
+        build_full_export_payloads,
+        decode_mesh_data,
+        encode_export_ack,
+        encode_export_index,
+        encode_export_start,
+        parse_export_ack,
+    )
+    from receiver import MeshReceiver
+
+    orig_org = config.ORGANIZATION_PATH
+    orig_precincts = config.PRECINCTS_DIR
+    config.ORGANIZATION_PATH = tmp_path / "ack_tx" / "organization.json"
+    config.PRECINCTS_DIR = tmp_path / "ack_tx" / "precincts"
+
+    try:
+        precinct_store.init_organization()
+        precinct_store.add_district("SOUTH", "South District")
+        precinct_store.add_precinct("SOUTH", "01", "South Precinct 01")
+        paths = precinct_store.paths_for_precinct("SOUTH01")
+        csv_store.init_csv(paths.status)
+        address_store.init_addresses(paths.addresses)
+        address_store.update_address("H001", "42 Pine St", path=paths.addresses)
+        csv_store.update_status("H001", "RED", path=paths.status)
+
+        assert parse_export_ack(encode_export_ack(3, 10)) == (3, 10)
+        assert parse_export_ack("hello") is None
+        start = encode_export_start(5)
+        assert start.upper().endswith(":5")
+
+        payloads = build_full_export_payloads()
+        assert len(payloads) >= 4
+
+        config.ORGANIZATION_PATH = tmp_path / "ack_rx" / "organization.json"
+        config.PRECINCTS_DIR = tmp_path / "ack_rx" / "precincts"
+        precinct_store.init_organization()
+
+        client = MeshtasticClient()
+        client._enter_mock_mode("export ack test")
+        receiver = MeshReceiver(client)
+        receiver.start()
+
+        acked, errors = client.send_export_with_acks(
+            payloads,
+            delay_seconds=0.0,
+            ack_timeout_seconds=2.0,
+            max_retries=2,
+        )
+        receiver.stop()
+
+        assert errors == []
+        assert acked == len(payloads)
+        assert "SOUTH01" in precinct_store.precinct_ids_for_district("SOUTH")
+        recv_paths = precinct_store.paths_for_precinct("SOUTH01")
+        addresses = address_store.read_address_map(recv_paths.addresses)
+        assert addresses.get("H001") == "42 Pine St"
+        rows = csv_store.read_all(recv_paths.status)
+        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
+
+        # Index markers are recognized but do not mutate import state on their own.
+        receiver2 = MeshReceiver(client)
+        idx = encode_export_index(1, 3)
+        packet = decode_mesh_data(idx)
+        assert packet is not None
+        assert packet.kind.value == "index"
+        receiver2._handle_message(idx)
+        assert receiver2._import_seq == 1
+    finally:
+        config.ORGANIZATION_PATH = orig_org
+        config.PRECINCTS_DIR = orig_precincts
+
+    print("export_ack_retry: OK")
+
+
 def test_ensure_precinct_from_import(tmp_path) -> None:
     import config
     import precinct_store
@@ -698,6 +777,7 @@ if __name__ == "__main__":
     test_global_pubsub_routing()
     with tempfile.TemporaryDirectory() as tmp:
         test_mesh_data_export(Path(tmp))
+        test_export_ack_retry(Path(tmp))
         test_ensure_precinct_from_import(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")

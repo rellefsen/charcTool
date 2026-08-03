@@ -56,6 +56,8 @@ class MeshReceiver:
     _thread: threading.Thread | None = field(default=None, init=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False)
     stats: ReceiverStats = field(default_factory=ReceiverStats)
+    _import_seq: int | None = field(default=None, init=False)
+    _import_total: int | None = field(default=None, init=False)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -101,6 +103,22 @@ class MeshReceiver:
 
     def _track_precinct(self, precinct_id: str) -> None:
         self.watched_precinct_ids.add(precinct_id.upper())
+
+    def _send_export_ack(self, seq: int, total: int) -> None:
+        from mesh_data_codec import encode_export_ack
+
+        ok, detail = self.client.send_text(encode_export_ack(seq, total))
+        if not ok:
+            logger.warning("Failed to send export ACK %s/%s: %s", seq, total, detail)
+
+    def _maybe_ack_imported_payload(self) -> None:
+        if (
+            self.stats.import_mode
+            and self._import_seq is not None
+            and self._import_total is not None
+        ):
+            self._send_export_ack(self._import_seq, self._import_total)
+            self._import_seq = None
 
     def _should_apply_status(self, precinct_id: str) -> bool:
         if self.stats.import_mode or self._import_grace_active():
@@ -158,21 +176,32 @@ class MeshReceiver:
                 )
 
         if applied:
+            self._maybe_ack_imported_payload()
             self._record_activity(text, ", ".join(applied))
 
     def _apply_data_packet(self, packet: MeshDataPacket, raw_text: str) -> None:
         summary_parts: list[str] = []
 
         try:
+            if packet.kind == MeshDataKind.ACK:
+                return
             if packet.kind == MeshDataKind.START:
                 self.stats.import_mode = True
+                self._import_seq = None
+                self._import_total = packet.total
                 self._extend_import_grace()
                 summary_parts.append("Full data import started")
             elif packet.kind == MeshDataKind.END:
                 self.stats.import_mode = False
+                self._import_seq = None
+                self._import_total = None
                 self._extend_import_grace()
                 self.stats.import_complete_pending = True
                 summary_parts.append("Full data import complete")
+            elif packet.kind == MeshDataKind.INDEX:
+                self._import_seq = packet.seq
+                self._import_total = packet.total
+                self._extend_import_grace()
             elif packet.kind == MeshDataKind.DISTRICT:
                 assert packet.district_id is not None
                 district = upsert_district(
@@ -182,6 +211,7 @@ class MeshReceiver:
                 self._extend_import_grace()
                 summary_parts.append(f"District {district.id}")
                 self.stats.data_imports_applied += 1
+                self._maybe_ack_imported_payload()
             elif packet.kind == MeshDataKind.PRECINCT:
                 assert packet.precinct_id is not None
                 assert packet.district_id is not None
@@ -194,6 +224,7 @@ class MeshReceiver:
                 self._extend_import_grace()
                 summary_parts.append(f"Precinct {precinct.id}")
                 self.stats.data_imports_applied += 1
+                self._maybe_ack_imported_payload()
             elif packet.kind == MeshDataKind.ADDRESSES:
                 assert packet.precinct_id is not None
                 ensure_precinct_from_import(packet.precinct_id)
@@ -212,6 +243,7 @@ class MeshReceiver:
                         f"(+{result['added']}, ~{result['updated']})"
                     )
                     self.stats.data_imports_applied += len(rows)
+                self._maybe_ack_imported_payload()
         except Exception as exc:
             self.stats.last_error = str(exc)
             logger.exception("Failed to apply mesh data packet: %s", raw_text)

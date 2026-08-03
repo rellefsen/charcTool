@@ -9,6 +9,9 @@ from typing import Any
 from config import (
     DEFAULT_DISTRICT_ID,
     DEFAULT_PRECINCT_ID,
+    EXPORT_ACK_TIMEOUT,
+    EXPORT_MAX_RETRIES,
+    EXPORT_PACKET_DELAY,
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_PORT,
     SYNC_PACKET_DELAY,
@@ -21,6 +24,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "meshtastic_port": MESHTASTIC_PORT,
     "channel_name": MESHTASTIC_CHANNEL_NAME,
     "sync_packet_delay": SYNC_PACKET_DELAY,
+    "export_packet_delay": EXPORT_PACKET_DELAY,
+    "export_ack_timeout": EXPORT_ACK_TIMEOUT,
+    "export_max_retries": EXPORT_MAX_RETRIES,
     "active_precinct_id": DEFAULT_PRECINCT_ID,
     "active_district_id": DEFAULT_DISTRICT_ID,
     "show_mock_testing": True,
@@ -51,6 +57,23 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise SettingsError("Sync delay must be a number.") from exc
 
+    export_delay = raw.get("export_packet_delay", settings["export_packet_delay"])
+    try:
+        settings["export_packet_delay"] = float(export_delay)
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("Export delay must be a number.") from exc
+
+    ack_timeout = raw.get("export_ack_timeout", settings["export_ack_timeout"])
+    try:
+        settings["export_ack_timeout"] = float(ack_timeout)
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("Export ACK timeout must be a number.") from exc
+
+    try:
+        settings["export_max_retries"] = int(raw.get("export_max_retries", settings["export_max_retries"]))
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("Export max retries must be a whole number.") from exc
+
     precinct = str(raw.get("active_precinct_id", settings["active_precinct_id"])).strip().upper()
     district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()
     settings["active_precinct_id"] = precinct or DEFAULT_PRECINCT_ID
@@ -71,6 +94,24 @@ def validate_settings(settings: dict[str, Any]) -> None:
         raise SettingsError("Sync delay cannot be negative.")
     if delay > 30:
         raise SettingsError("Sync delay must be 30 seconds or less.")
+
+    export_delay = float(settings["export_packet_delay"])
+    if export_delay < 0:
+        raise SettingsError("Export delay cannot be negative.")
+    if export_delay > 60:
+        raise SettingsError("Export delay must be 60 seconds or less.")
+
+    ack_timeout = float(settings["export_ack_timeout"])
+    if ack_timeout < 1:
+        raise SettingsError("Export ACK timeout must be at least 1 second.")
+    if ack_timeout > 120:
+        raise SettingsError("Export ACK timeout must be 120 seconds or less.")
+
+    retries = int(settings["export_max_retries"])
+    if retries < 1:
+        raise SettingsError("Export max retries must be at least 1.")
+    if retries > 10:
+        raise SettingsError("Export max retries must be 10 or less.")
 
 
 def load_settings() -> dict[str, Any]:

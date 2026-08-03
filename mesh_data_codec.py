@@ -23,11 +23,19 @@ _DATA_ADDRESS_BULK_RE = re.compile(
     re.IGNORECASE,
 )
 _DATA_START_RE = re.compile(
-    rf"^{re.escape(DATA_PACKET_PREFIX)}:S:FULL$",
+    rf"^{re.escape(DATA_PACKET_PREFIX)}:S:FULL(?::(\d+))?$",
     re.IGNORECASE,
 )
 _DATA_END_RE = re.compile(
     rf"^{re.escape(DATA_PACKET_PREFIX)}:Z:FULL$",
+    re.IGNORECASE,
+)
+_DATA_INDEX_RE = re.compile(
+    rf"^{re.escape(DATA_PACKET_PREFIX)}:I:(\d+)/(\d+)$",
+    re.IGNORECASE,
+)
+_DATA_ACK_RE = re.compile(
+    rf"^{re.escape(DATA_PACKET_PREFIX)}:K:(\d+)/(\d+)$",
     re.IGNORECASE,
 )
 _ADDRESS_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})\|(.+)$")
@@ -36,6 +44,8 @@ _ADDRESS_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})\|(.+)$")
 class MeshDataKind(str, Enum):
     START = "start"
     END = "end"
+    INDEX = "index"
+    ACK = "ack"
     DISTRICT = "district"
     PRECINCT = "precinct"
     ADDRESSES = "addresses"
@@ -55,6 +65,8 @@ class MeshDataPacket:
     precinct_id: str | None = None
     precinct_name: str | None = None
     addresses: tuple[MeshAddressEntry, ...] = ()
+    seq: int | None = None
+    total: int | None = None
 
 
 def _sanitize_field(value: str) -> str:
@@ -65,12 +77,29 @@ def _packet_byte_len(packet: str) -> int:
     return len(packet.encode("utf-8"))
 
 
-def encode_export_start() -> str:
-    return f"{DATA_PACKET_PREFIX}:S:FULL"
+def encode_export_start(total_payloads: int | None = None) -> str:
+    if total_payloads is None:
+        return f"{DATA_PACKET_PREFIX}:S:FULL"
+    return f"{DATA_PACKET_PREFIX}:S:FULL:{int(total_payloads)}"
 
 
 def encode_export_end() -> str:
     return f"{DATA_PACKET_PREFIX}:Z:FULL"
+
+
+def encode_export_index(seq: int, total: int) -> str:
+    return f"{DATA_PACKET_PREFIX}:I:{int(seq)}/{int(total)}"
+
+
+def encode_export_ack(seq: int, total: int) -> str:
+    return f"{DATA_PACKET_PREFIX}:K:{int(seq)}/{int(total)}"
+
+
+def parse_export_ack(text: str) -> tuple[int, int] | None:
+    match = _DATA_ACK_RE.match(text.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def encode_district(district_id: str, name: str) -> str:
@@ -145,11 +174,29 @@ def decode_mesh_data(text: str) -> MeshDataPacket | None:
     text = text.strip()
     upper = text.upper()
 
-    if _DATA_START_RE.match(upper):
-        return MeshDataPacket(kind=MeshDataKind.START)
+    start_match = _DATA_START_RE.match(upper)
+    if start_match:
+        total = int(start_match.group(1)) if start_match.group(1) else None
+        return MeshDataPacket(kind=MeshDataKind.START, total=total)
 
     if _DATA_END_RE.match(upper):
         return MeshDataPacket(kind=MeshDataKind.END)
+
+    index_match = _DATA_INDEX_RE.match(upper)
+    if index_match:
+        return MeshDataPacket(
+            kind=MeshDataKind.INDEX,
+            seq=int(index_match.group(1)),
+            total=int(index_match.group(2)),
+        )
+
+    ack_match = _DATA_ACK_RE.match(upper)
+    if ack_match:
+        return MeshDataPacket(
+            kind=MeshDataKind.ACK,
+            seq=int(ack_match.group(1)),
+            total=int(ack_match.group(2)),
+        )
 
     district_match = _DATA_DISTRICT_RE.match(text)
     if district_match:
@@ -199,22 +246,12 @@ def is_data_packet(text: str) -> bool:
     return decode_mesh_data(text) is not None
 
 
-def build_full_export_packets() -> list[str]:
-    """
-    Build the full mesh export sequence: org structure, addresses, and statuses.
-
-    Packet order:
-      1. ND:S:FULL start marker
-      2. All districts (ND:D)
-      3. All precincts (ND:P)
-      4. All addresses per precinct (ND:A, chunked)
-      5. All house statuses per precinct (NS:B, chunked)
-      6. ND:Z:FULL end marker
-    """
+def build_full_export_payloads() -> list[str]:
+    """Build numbered export payloads (districts, precincts, addresses, statuses)."""
     from address_store import read_address_map
     from precinct_store import list_districts, list_precincts, paths_for_precinct
 
-    packets: list[str] = [encode_export_start()]
+    packets: list[str] = []
 
     for district in list_districts():
         packets.append(encode_district(district.id, district.name))
@@ -235,5 +272,10 @@ def build_full_export_packets() -> list[str]:
             sync_rows = [(row["house_id"], row["status_code"]) for row in status_rows]
             packets.extend(encode_bulk_sync_chunks(precinct.id, sync_rows))
 
-    packets.append(encode_export_end())
     return packets
+
+
+def build_full_export_packets() -> list[str]:
+    """Legacy packet list including start/end markers without index/ACK framing."""
+    payloads = build_full_export_payloads()
+    return [encode_export_start(), *payloads, encode_export_end()]
