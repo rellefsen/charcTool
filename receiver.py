@@ -99,12 +99,13 @@ class MeshReceiver:
     def _import_grace_active(self) -> bool:
         return time.time() < self.stats.import_grace_until
 
+    def _track_precinct(self, precinct_id: str) -> None:
+        self.watched_precinct_ids.add(precinct_id.upper())
+
     def _should_apply_status(self, precinct_id: str) -> bool:
         if self.stats.import_mode or self._import_grace_active():
             return True
-        if not self.watched_precinct_ids:
-            return True
-        return precinct_id in self.watched_precinct_ids
+        return precinct_id in self.watched_precinct_ids or not self.watched_precinct_ids
 
     def _handle_message(self, text: str, from_id: str | None = None) -> None:
         del from_id
@@ -133,6 +134,7 @@ class MeshReceiver:
 
             try:
                 ensure_precinct_from_import(precinct_id)
+                self._track_precinct(precinct_id)
                 paths = paths_for_precinct(precinct_id)
                 ensure_status_csv(paths.status)
                 row = apply_remote_update(
@@ -188,12 +190,14 @@ class MeshReceiver:
                     packet.district_id,
                     packet.precinct_name or packet.precinct_id,
                 )
+                self._track_precinct(precinct.id)
                 self._extend_import_grace()
                 summary_parts.append(f"Precinct {precinct.id}")
                 self.stats.data_imports_applied += 1
             elif packet.kind == MeshDataKind.ADDRESSES:
                 assert packet.precinct_id is not None
                 ensure_precinct_from_import(packet.precinct_id)
+                self._track_precinct(packet.precinct_id)
                 paths = paths_for_precinct(packet.precinct_id)
                 ensure_status_csv(paths.status)
                 rows = [
