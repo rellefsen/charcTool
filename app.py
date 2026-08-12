@@ -15,6 +15,7 @@ from config import (
     STATUS_BG,
     STATUS_CODES,
     STATUS_COLORS,
+    STATUS_GREEN,
     STATUS_LABELS,
     STATUS_URGENCY,
     MESH_MAX_PAYLOAD_BYTES,
@@ -37,7 +38,7 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
-from mesh_data_codec import build_export_payloads, estimate_export_seconds
+from heartbeat_service import HeartbeatService, send_district_heartbeats
 from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
@@ -66,6 +67,7 @@ from precinct_store import (
     suggest_next_precinct_suffix,
 )
 from receiver import MeshReceiver
+from recent_clears_store import record_clear
 from settings_store import SettingsError, load_settings, save_settings
 from sync_state import (
     compute_sync_rows,
@@ -96,91 +98,8 @@ def _sync_packet_delay() -> float:
     return float(st.session_state.app_settings["sync_packet_delay"])
 
 
-def _export_packet_delay() -> float:
-    return float(st.session_state.app_settings.get("export_packet_delay", 2.0))
-
-
-def _export_min_packet_delay() -> float:
-    return float(st.session_state.app_settings.get("export_min_packet_delay", 0.5))
-
-
-def _export_ack_timeout() -> float:
-    return float(st.session_state.app_settings.get("export_ack_timeout", 8.0))
-
-
-def _export_max_retries() -> int:
-    return int(st.session_state.app_settings.get("export_max_retries", 2))
-
-
-def _export_ack_window() -> int:
-    return int(st.session_state.app_settings.get("export_ack_window", 3))
-
-
-def _send_export_with_acks(payloads: list[str]) -> tuple[int, list[str], int]:
-    """Send a full export with ACK/retry. Returns acked count, errors, total payloads."""
-    total = len(payloads)
-    delay = _export_packet_delay()
-    min_delay = _export_min_packet_delay()
-    ack_timeout = _export_ack_timeout()
-    max_retries = _export_max_retries()
-    ack_window = _export_ack_window()
-    est_seconds = estimate_export_seconds(
-        total,
-        delay_seconds=delay,
-        min_delay_seconds=min_delay,
-        ack_timeout_seconds=ack_timeout,
-        ack_window=ack_window,
-    )
-
-    with st.status(
-        f"Full export: sending {total} payload packet(s) with ACK/retry…",
-        expanded=True,
-    ) as send_status:
-        st.caption(
-            f"Estimated time: ~{est_seconds:.0f}s "
-            f"({ack_window}-packet ACK windows, {min_delay:g}–{delay:g}s adaptive delay, "
-            f"{ack_timeout:g}s ACK timeout, up to {max_retries} retries)"
-        )
-        progress = st.progress(0.0, text="Starting export…")
-        detail = st.empty()
-
-        def _on_progress(current: int, total_count: int) -> None:
-            progress.progress(
-                current / total_count,
-                text=f"Payload {current} of {total_count}…",
-            )
-            packet_preview = payloads[current - 1]
-            detail.markdown(
-                f"**Payload {current}/{total_count}** — `{packet_preview[:80]}"
-                + ("…" if len(packet_preview) > 80 else "")
-                + "`"
-            )
-
-        def _on_ack_wait(window_end: int, total_count: int, attempt: int) -> None:
-            progress.progress(
-                window_end / total_count,
-                text=f"Waiting for ACK {window_end}/{total_count} (attempt {attempt})…",
-            )
-
-        acked, errors = st.session_state.client.send_export_with_acks(
-            payloads,
-            delay_seconds=delay,
-            min_delay_seconds=min_delay,
-            ack_timeout_seconds=ack_timeout,
-            max_retries=max_retries,
-            ack_window=ack_window,
-            on_progress=_on_progress,
-            on_ack_wait=_on_ack_wait,
-        )
-
-        if errors:
-            send_status.update(label="Export finished with errors", state="error")
-            progress.progress(1.0, text="Export finished with errors")
-        else:
-            send_status.update(label="Export complete", state="complete")
-            progress.progress(1.0, text="All payloads acknowledged")
-
-    return acked, errors, total
+def _heartbeat_interval() -> float:
+    return float(st.session_state.app_settings.get("heartbeat_interval_seconds", 3600.0))
 
 
 def _send_mesh_packets(
@@ -372,6 +291,37 @@ def _restart_receiver_if_needed() -> None:
         receiver.start()
 
 
+def _restart_heartbeat_if_needed() -> None:
+    settings = st.session_state.app_settings
+    enabled = bool(settings.get("heartbeat_enabled", True))
+    if st.session_state.mode != "Transmitter" or not enabled:
+        service = st.session_state.get("heartbeat_service")
+        if service is not None:
+            service.stop()
+        return
+
+    district_id = str(settings["active_district_id"]).upper()
+    service: HeartbeatService | None = st.session_state.get("heartbeat_service")
+    if (
+        service is None
+        or service.district_id != district_id
+        or service.interval_seconds != _heartbeat_interval()
+        or service.packet_delay_seconds != _sync_packet_delay()
+    ):
+        if service is not None:
+            service.stop()
+        service = HeartbeatService(
+            st.session_state.client,
+            district_id,
+            interval_seconds=_heartbeat_interval(),
+            packet_delay_seconds=_sync_packet_delay(),
+        )
+        st.session_state.heartbeat_service = service
+
+    if service._thread is None or not service._thread.is_alive():
+        service.start()
+
+
 def _reconnect_radio(app_settings: dict | None = None) -> None:
     if app_settings is not None:
         st.session_state.app_settings = app_settings
@@ -387,8 +337,9 @@ def _reconnect_radio(app_settings: dict | None = None) -> None:
     _ensure_global_pubsub()
     _register_text_message_listener()
     _configure_receiver()
-    st.session_state.client.reconnect()
     _restart_receiver_if_needed()
+    _restart_heartbeat_if_needed()
+    st.session_state.client.reconnect()
 
 
 def _read_district_rows(district_id: str) -> list[dict]:
@@ -540,6 +491,8 @@ def _init_session_state() -> None:
         st.session_state.pending_edits = {}
     if "last_sync_log" not in st.session_state:
         st.session_state.last_sync_log = []
+    if "heartbeat_service" not in st.session_state:
+        st.session_state.heartbeat_service = None
 
 
 # ---------------------------------------------------------------------------
@@ -992,196 +945,59 @@ def _render_sidebar() -> None:
 
         st.divider()
         st.subheader("Mesh sync")
-        paths = _active_paths()
-        if has_last_sync(path=paths.last_sync):
-            st.caption("Next sync sends **changed houses only**.")
-        else:
-            st.caption("First sync will send **all houses**.")
-        st.session_state.force_full_sync = st.checkbox(
-            "Force full sync (all houses)",
-            value=st.session_state.get("force_full_sync", False),
-        )
-
+        st.caption("Manual sync sends **changed houses only** since the last successful sync.")
         if st.session_state.mode == "Transmitter":
-            with st.expander("Full data export", expanded=False):
-                st.caption(
-                    "Send districts, precincts, addresses, and house statuses to receiver "
-                    "nodes. Scope the export to everything or selected districts/precincts."
+            heartbeat_enabled = st.checkbox(
+                "Automatic hourly heartbeat",
+                value=bool(st.session_state.app_settings.get("heartbeat_enabled", True)),
+                help="Periodically send all non-green houses plus recent clears.",
+                key="heartbeat_enabled_checkbox",
+            )
+            heartbeat_interval_minutes = st.number_input(
+                "Heartbeat interval (minutes)",
+                min_value=1,
+                max_value=1440,
+                step=1,
+                value=int(
+                    float(st.session_state.app_settings.get("heartbeat_interval_seconds", 3600))
+                    / 60
+                ),
+                key="heartbeat_interval_minutes_input",
+            )
+            _save_context_settings(
+                heartbeat_enabled=heartbeat_enabled,
+                heartbeat_interval_seconds=float(heartbeat_interval_minutes) * 60.0,
+            )
+            if st.button("Send heartbeat now", use_container_width=True, key="send_heartbeat_btn"):
+                results = send_district_heartbeats(
+                    st.session_state.client,
+                    _active_district_id(),
+                    delay_seconds=_sync_packet_delay(),
                 )
-                districts = list_districts()
-                precincts = list_precincts()
-                export_scope = st.radio(
-                    "Export scope",
-                    options=["All data", "Selected districts", "Selected precincts"],
-                    horizontal=True,
-                    key="export_scope_radio",
-                )
-                selected_district_ids: set[str] | None = None
-                selected_precinct_ids: set[str] | None = None
-                if export_scope == "Selected districts":
-                    district_options = [district.id for district in districts]
-                    picked_districts = st.multiselect(
-                        "Districts to export",
-                        options=district_options,
-                        default=district_options[:1],
-                        key="export_district_multiselect",
-                    )
-                    selected_district_ids = {did.upper() for did in picked_districts}
-                elif export_scope == "Selected precincts":
-                    precinct_options = [precinct.id for precinct in precincts]
-                    picked_precincts = st.multiselect(
-                        "Precincts to export",
-                        options=precinct_options,
-                        default=[_active_precinct_id()],
-                        key="export_precinct_multiselect",
-                    )
-                    selected_precinct_ids = {pid.upper() for pid in picked_precincts}
-
-                preview_error = ""
-                preview_payloads: list[str] = []
-                try:
-                    preview_payloads = build_export_payloads(
-                        district_ids=selected_district_ids,
-                        precinct_ids=selected_precinct_ids,
-                    )
-                except ValueError as exc:
-                    preview_error = str(exc)
-
-                preview_count = len(preview_payloads)
-                preview_estimate = estimate_export_seconds(
-                    preview_count,
-                    delay_seconds=float(
-                        st.session_state.app_settings.get("export_packet_delay", 2.0)
-                    ),
-                    min_delay_seconds=float(
-                        st.session_state.app_settings.get("export_min_packet_delay", 0.5)
-                    ),
-                    ack_timeout_seconds=float(
-                        st.session_state.app_settings.get("export_ack_timeout", 8.0)
-                    ),
-                    ack_window=int(st.session_state.app_settings.get("export_ack_window", 3)),
-                )
-                if preview_error:
-                    st.warning(preview_error)
-                elif preview_count == 0:
-                    st.warning("Nothing selected to export.")
+                errors = [err for _, _, errs in results for err in errs]
+                if errors:
+                    st.error("Heartbeat finished with errors.")
                 else:
-                    scope_label = {
-                        "All data": f"{len(districts)} district(s) and {len(precincts)} precinct(s)",
-                        "Selected districts": f"{len(selected_district_ids or [])} district(s)",
-                        "Selected precincts": f"{len(selected_precinct_ids or [])} precinct(s)",
-                    }[export_scope]
-                    st.caption(
-                        f"Ready to export **{scope_label}** as "
-                        f"**{preview_count}** payload packet(s) "
-                        f"(~{preview_estimate:.0f}s estimated)."
+                    st.success(
+                        f"Heartbeat sent for {len(results)} precinct(s) in district "
+                        f"{_active_district_id()}."
                     )
-                st.caption(
-                    "Payloads embed sequence numbers and use windowed ACKs for faster, "
-                    "reliable transfer."
-                )
-                export_delay = st.number_input(
-                    "Export max delay (seconds)",
-                    min_value=0.0,
-                    max_value=60.0,
-                    step=0.5,
-                    value=float(
-                        st.session_state.app_settings.get("export_packet_delay", 2.0)
-                    ),
-                    help="Upper delay between packets; retries use this value.",
-                    key="export_packet_delay_input",
-                )
-                export_min_delay = st.number_input(
-                    "Export min delay (seconds)",
-                    min_value=0.0,
-                    max_value=60.0,
-                    step=0.1,
-                    value=float(
-                        st.session_state.app_settings.get("export_min_packet_delay", 0.5)
-                    ),
-                    help="Short pause between packets inside an ACK window.",
-                    key="export_min_packet_delay_input",
-                )
-                export_ack_timeout = st.number_input(
-                    "Export ACK timeout (seconds)",
-                    min_value=1.0,
-                    max_value=120.0,
-                    step=1.0,
-                    value=float(
-                        st.session_state.app_settings.get("export_ack_timeout", 8.0)
-                    ),
-                    help="How long to wait for the receiver to ACK each window.",
-                    key="export_ack_timeout_input",
-                )
-                export_ack_window = st.number_input(
-                    "Export ACK window (packets)",
-                    min_value=1,
-                    max_value=20,
-                    step=1,
-                    value=int(st.session_state.app_settings.get("export_ack_window", 3)),
-                    help="Receiver ACKs after this many payloads (or at end of export).",
-                    key="export_ack_window_input",
-                )
-                export_max_retries = st.number_input(
-                    "Export max retries",
-                    min_value=1,
-                    max_value=10,
-                    step=1,
-                    value=int(st.session_state.app_settings.get("export_max_retries", 2)),
-                    help="How many times to resend a window if no ACK arrives.",
-                    key="export_max_retries_input",
-                )
-                export_button_label = {
-                    "All data": "Export all data to mesh",
-                    "Selected districts": "Export selected districts to mesh",
-                    "Selected precincts": "Export selected precincts to mesh",
-                }[export_scope]
-                if st.button(
-                    export_button_label,
-                    use_container_width=True,
-                    key="export_all_data_btn",
-                ):
-                    _save_context_settings(
-                        export_packet_delay=export_delay,
-                        export_min_packet_delay=export_min_delay,
-                        export_ack_timeout=export_ack_timeout,
-                        export_ack_window=int(export_ack_window),
-                        export_max_retries=int(export_max_retries),
-                    )
-                    try:
-                        payloads = build_export_payloads(
-                            district_ids=selected_district_ids,
-                            precinct_ids=selected_precinct_ids,
-                        )
-                    except ValueError as exc:
-                        st.error(str(exc))
-                        st.stop()
+                st.rerun()
+            service: HeartbeatService | None = st.session_state.get("heartbeat_service")
+            if heartbeat_enabled and service and service.last_run_at:
+                last_run = datetime.fromtimestamp(service.last_run_at).strftime("%m/%d %H:%M")
+                st.caption(f"Last automatic heartbeat: **{last_run}**")
+            elif heartbeat_enabled:
+                st.caption("Automatic heartbeat runs on the configured interval.")
 
-                    if not payloads:
-                        st.warning("Nothing to export.")
-                        st.stop()
-
-                    acked, errors, total_payloads = _send_export_with_acks(payloads)
-
-                    st.session_state.last_sync_log = [
-                        f"Full export: {acked}/{total_payloads} payload(s) acknowledged",
-                        *[f"  [{i + 1}] {pkt}" for i, pkt in enumerate(payloads[:20])],
-                    ] + (["  …"] if len(payloads) > 20 else []) + errors
-
-                    if errors:
-                        st.error(
-                            f"Acknowledged {acked}/{total_payloads} payload(s) — some failed."
-                        )
-                    else:
-                        st.success(
-                            f"Full export complete — {acked}/{total_payloads} payload(s) acknowledged."
-                        )
-                    st.rerun()
+        st.caption(
+            "Organization, addresses, and initial house lists are seeded locally on each node."
+        )
 
         st.divider()
         st.subheader("House management")
         st.caption(
-            "Local board only. Addresses stay local unless you run **Full data export**."
+            "Local board only. Addresses are not sent over the mesh."
         )
         paths = _active_paths()
         house_ids = [r["house_id"] for r in read_all(path=paths.status)]
@@ -1447,8 +1263,16 @@ def _render_readonly_board(
 
 
 def _apply_pending_edits(paths: PrecinctPaths) -> None:
+    precinct_id = _active_precinct_id()
+    current_rows = {
+        row["house_id"].upper(): row["status_code"]
+        for row in read_all(path=paths.status)
+    }
     for house_id, status in st.session_state.pending_edits.items():
+        previous = current_rows.get(house_id.upper())
         update_status(house_id, status, path=paths.status)
+        if previous and previous != STATUS_GREEN and status == STATUS_GREEN:
+            record_clear(precinct_id, house_id)
     if st.session_state.pending_edits:
         st.session_state.pending_edits.clear()
 
@@ -1462,10 +1286,7 @@ def _render_transmitter_mode() -> None:
     st.caption(f"Precinct: **{precinct_label}**")
     st.caption("Update house statuses and sync to the mesh network.")
     st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
-    if has_last_sync(path=paths.last_sync):
-        st.caption("Only changed houses are sent after the first successful sync.")
-    else:
-        st.caption("First sync transmits the full neighborhood board.")
+    st.caption("Only **changed** houses are sent when you click sync.")
 
     rows = sort_rows_by_urgency(read_all(path=paths.status))
     _render_print_board_actions(
@@ -1496,16 +1317,18 @@ def _render_transmitter_mode() -> None:
     if sync_clicked:
         _apply_pending_edits(paths)
         rows = read_all(path=paths.status)
-        force_full = st.session_state.get("force_full_sync", False)
         sync_rows, sync_mode = compute_sync_rows(
             rows,
-            force_full=force_full,
             last_sync_path=paths.last_sync,
         )
 
         if sync_mode == "none":
             st.info("Nothing to sync — no house statuses have changed since last mesh sync.")
             st.rerun()
+
+        for house_id, status_code in sync_rows:
+            if status_code == STATUS_GREEN:
+                record_clear(_active_precinct_id(), house_id)
 
         try:
             packets = encode_bulk_sync_chunks(_active_precinct_id(), sync_rows)
@@ -1586,7 +1409,6 @@ def _render_transmitter_mode() -> None:
 
         if success == total_packets:
             save_last_sync(rows, path=paths.last_sync)
-            st.session_state.force_full_sync = False
 
         st.rerun()
 
@@ -1696,15 +1518,6 @@ def _render_receiver_mode() -> None:
     receiver: MeshReceiver = st.session_state.receiver
     stats = receiver.stats
 
-    if stats.import_complete_pending:
-        stats.import_complete_pending = False
-        _configure_receiver()
-        st.session_state.pop("receiver_baseline", None)
-        st.success(
-            "Mesh import complete. Organization and data files were updated — "
-            "use **Board view** in the sidebar to switch district or precinct."
-        )
-
     if st.session_state.receiver_view_scope == "precinct":
         precinct = get_precinct(_receiver_display_precinct_id())
         view_label = (
@@ -1733,16 +1546,14 @@ def _render_receiver_mode() -> None:
     m1.metric("Packets received", stats.packets_received)
     m2.metric("Updates applied", stats.updates_applied)
     m3.metric("Pending changes", len(pending))
-    listener_label = "Importing" if stats.import_mode else ("Active" if stats.running else "Stopped")
-    m4.metric("Listener", listener_label)
+    m4.metric("Listener", "Active" if stats.running else "Stopped")
 
-    if stats.import_mode or stats.import_grace_until > 0:
-        if stats.import_mode:
-            st.warning("Receiving full data export — writing organization, addresses, and statuses.")
-        elif stats.import_grace_until > time.time():
-            st.info("Finishing import — still accepting late-arriving status packets.")
-    if stats.data_imports_applied:
-        st.caption(f"Data records applied: **{stats.data_imports_applied}**")
+    if stats.last_heartbeat_at:
+        heartbeat_lines = [
+            f"**{precinct_id}** — {_format_change_time(at)}"
+            for precinct_id, at in sorted(stats.last_heartbeat_at.items())
+        ]
+        st.caption("Last heartbeat: " + ", ".join(heartbeat_lines))
 
     if stats.last_update:
         st.info(f"Last mesh update: **{stats.last_update}**")
@@ -1769,8 +1580,7 @@ def _render_receiver_mode() -> None:
     if pending:
         st.subheader(f"Changes since watch started ({len(pending)})")
         st.caption(
-            "Status transitions are shown in the **Was → Now** column below. "
-            "Use **Full data export** on the transmitter to send addresses and organization."
+            "Status transitions are shown in the **Was → Now** column below."
         )
         for change in pending:
             label = format_status_change(
@@ -1832,9 +1642,13 @@ def main() -> None:
     if st.session_state.mode == "Transmitter":
         if st.session_state.receiver.stats.running:
             st.session_state.receiver.stop()
+        _restart_heartbeat_if_needed()
         st.session_state._last_mode = "Transmitter"
         _render_transmitter_mode()
     else:
+        service = st.session_state.get("heartbeat_service")
+        if service is not None:
+            service.stop()
         if st.session_state.get("_last_mode") != "Receiver":
             st.session_state.pop("receiver_baseline", None)
         st.session_state._last_mode = "Receiver"

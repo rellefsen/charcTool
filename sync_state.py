@@ -86,6 +86,19 @@ def compute_sync_rows(
     return changes, "delta"
 
 
+def compute_non_green_rows(
+    current_rows: list[dict[str, str]],
+) -> list[tuple[str, str]]:
+    """Return (house_id, status_code) for every house that is not GREEN."""
+    from config import STATUS_GREEN
+
+    return [
+        (row["house_id"], row["status_code"])
+        for row in current_rows
+        if row["status_code"].upper() != STATUS_GREEN
+    ]
+
+
 def compute_changes_since_baseline(
     current_rows: list[dict[str, str]],
     baseline: dict[str, str],

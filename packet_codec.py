@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 from config import (
     MESH_MAX_PAYLOAD_BYTES,
     PACKET_PREFIX,
     STATUS_CODES,
     STATUS_FROM_WIRE,
+    STATUS_GREEN,
     STATUS_WIRE,
 )
 
@@ -37,6 +39,22 @@ _LEGACY_BULK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Heartbeat markers: NS:SOUTH01:HB:S / NS:SOUTH01:HB:E
+_HB_START_RE = re.compile(
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):HB:S$",
+    re.IGNORECASE,
+)
+_HB_END_RE = re.compile(
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):HB:E$",
+    re.IGNORECASE,
+)
+
+# Recent clears: NS:SOUTH01:C:H003G,H009G
+_CLEAR_RE = re.compile(
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):C:(.+)$",
+    re.IGNORECASE,
+)
+
 _BULK_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})([RYG])$", re.IGNORECASE)
 
 
@@ -45,6 +63,19 @@ class MeshUpdate:
     precinct_id: str | None
     house_id: str
     status_code: str
+
+
+class ControlPacketKind(str, Enum):
+    HEARTBEAT_START = "heartbeat_start"
+    HEARTBEAT_END = "heartbeat_end"
+    RECENT_CLEARS = "recent_clears"
+
+
+@dataclass(frozen=True)
+class ControlPacket:
+    kind: ControlPacketKind
+    precinct_id: str
+    updates: tuple[MeshUpdate, ...] = ()
 
 
 def encode_status(precinct_id: str, house_id: str, status_code: str) -> str:
@@ -242,3 +273,126 @@ def encode_bulk(precinct_id: str, rows: list[tuple[str, str]]) -> list[str]:
         encode_status(precinct_id, house_id, status_code)
         for house_id, status_code in rows
     ]
+
+
+def encode_heartbeat_start(precinct_id: str) -> str:
+    precinct_id = precinct_id.strip().upper()
+    return f"{PACKET_PREFIX}:{precinct_id}:HB:S"
+
+
+def encode_heartbeat_end(precinct_id: str) -> str:
+    precinct_id = precinct_id.strip().upper()
+    return f"{PACKET_PREFIX}:{precinct_id}:HB:E"
+
+
+def _clears_packet_for_parts(precinct_id: str, parts: list[str]) -> str:
+    precinct_id = precinct_id.strip().upper()
+    return f"{PACKET_PREFIX}:{precinct_id}:C:{','.join(parts)}"
+
+
+def encode_recent_clear_chunks(
+    precinct_id: str,
+    rows: list[tuple[str, str]],
+    max_bytes: int = MESH_MAX_PAYLOAD_BYTES,
+) -> list[str]:
+    """Encode explicit GREEN clears into NS:{precinct}:C:... packets."""
+    if not rows:
+        return []
+
+    precinct_id = precinct_id.strip().upper()
+    parts = [_house_part(house_id, status_code) for house_id, status_code in rows]
+    for house_id, status_code in rows:
+        if status_code.upper() != STATUS_GREEN:
+            raise ValueError(
+                f"Recent clear packets only carry GREEN statuses (got {house_id}={status_code})"
+            )
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+
+    for part in parts:
+        candidate = current + [part]
+        packet = _clears_packet_for_parts(precinct_id, candidate)
+        if _packet_byte_len(packet) <= max_bytes:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = [part]
+            packet = _clears_packet_for_parts(precinct_id, current)
+            if _packet_byte_len(packet) > max_bytes:
+                raise ValueError(
+                    f"Clear entry {part!r} exceeds packet limit ({max_bytes} bytes)"
+                )
+        else:
+            raise ValueError(
+                f"Clear entry {part!r} exceeds packet limit ({max_bytes} bytes)"
+            )
+
+    if current:
+        chunks.append(current)
+
+    return [_clears_packet_for_parts(precinct_id, chunk) for chunk in chunks]
+
+
+def build_heartbeat_packets(
+    precinct_id: str,
+    non_green_rows: list[tuple[str, str]],
+    recent_clear_rows: list[tuple[str, str]],
+    max_bytes: int = MESH_MAX_PAYLOAD_BYTES,
+) -> list[str]:
+    """Build a full heartbeat sequence for one precinct."""
+    packets = [encode_heartbeat_start(precinct_id)]
+    if non_green_rows:
+        packets.extend(
+            encode_bulk_sync_chunks(precinct_id, non_green_rows, max_bytes=max_bytes)
+        )
+    if recent_clear_rows:
+        packets.extend(
+            encode_recent_clear_chunks(precinct_id, recent_clear_rows, max_bytes=max_bytes)
+        )
+    packets.append(encode_heartbeat_end(precinct_id))
+    return packets
+
+
+def parse_control_packet(text: str) -> ControlPacket | None:
+    """Parse heartbeat markers and recent-clear packets."""
+    if not text:
+        return None
+
+    text = text.strip()
+    start_match = _HB_START_RE.match(text)
+    if start_match:
+        return ControlPacket(
+            kind=ControlPacketKind.HEARTBEAT_START,
+            precinct_id=start_match.group(1).upper(),
+        )
+
+    end_match = _HB_END_RE.match(text)
+    if end_match:
+        return ControlPacket(
+            kind=ControlPacketKind.HEARTBEAT_END,
+            precinct_id=end_match.group(1).upper(),
+        )
+
+    clear_match = _CLEAR_RE.match(text)
+    if clear_match:
+        precinct_id = clear_match.group(1).upper()
+        updates = tuple(_parse_bulk_parts(precinct_id, clear_match.group(2)))
+        return ControlPacket(
+            kind=ControlPacketKind.RECENT_CLEARS,
+            precinct_id=precinct_id,
+            updates=updates,
+        )
+
+    return None
+
+
+def is_control_packet(text: str) -> bool:
+    return parse_control_packet(text) is not None
+
+
+def is_mesh_protocol_packet(text: str) -> bool:
+    """Return True for any charcTool mesh protocol message (not free-form text)."""
+    return is_status_packet(text) or is_control_packet(text)

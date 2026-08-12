@@ -213,3 +213,41 @@ def apply_remote_update(
 ) -> dict[str, str]:
     """Apply a status received from the mesh (same as local update)."""
     return update_status(house_id, status_code, path=path)
+
+
+def reconcile_non_green_snapshot(
+    snapshot_house_ids: set[str],
+    path: Path | None = None,
+) -> list[str]:
+    """
+    After a heartbeat snapshot, set any local RED/YELLOW house not in the snapshot to GREEN.
+
+    Returns house IDs that were cleared.
+    """
+    target = path or CSV_PATH
+    ensure_status_csv(target)
+    snapshot = {house_id.strip().upper() for house_id in snapshot_house_ids}
+
+    with _lock:
+        with target.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+
+        cleared: list[str] = []
+        ts = _now_iso()
+        for row in rows:
+            house_id = row["house_id"].upper()
+            if row["status_code"] == STATUS_GREEN:
+                continue
+            if house_id in snapshot:
+                continue
+            row["status_code"] = STATUS_GREEN
+            row["timestamp"] = ts
+            cleared.append(house_id)
+
+        if cleared:
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerows(sorted(rows, key=lambda r: r["house_id"]))
+
+    return sorted(cleared)
