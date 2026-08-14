@@ -14,7 +14,7 @@ The laptop app talks to a Meshtastic radio over **USB serial** or **Bluetooth**.
 - **Manual seeding** — copy org and precinct files to every laptop. There is no over-air full data export.
 - **Text messages** — optional free-form chat on the same mesh channel.
 
-Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick or shared zip.
+Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick, a shared zip, or the sample [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) in this repo.
 
 A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Use the **mesh** APK on the field phone; **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
 
@@ -162,7 +162,9 @@ Copy these three kinds of files:
 | Addresses | `data/precincts/{PRECINCT_ID}/house_addresses.csv` |
 | Status | `data/precincts/{PRECINCT_ID}/neighborhood_status.csv` |
 
-Do **not** rely on Git for this; those paths are ignored. Use a USB stick or a zip (for example `organization.json` + `precincts/`).
+Do **not** put live operational CSVs in Git; `data/organization.json` and `data/precincts/` are gitignored. Seed each node from a USB stick or zip.
+
+The repo includes a starter zip, [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) (`organization.json` plus CHARC01/02 and SOUTH01/02/03). Unzip it into `data/` on each laptop, or **Import seed** in the Android app.
 
 `data/app_settings.json` is per laptop (channel, serial vs Bluetooth, heartbeat interval). It is also gitignored.
 
