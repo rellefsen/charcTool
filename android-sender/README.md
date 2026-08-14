@@ -101,7 +101,7 @@ The Meshtastic SDK 0.1.0 is built with Kotlin 2.4 and requires compileSdk 37.
 
 ## Seed zip
 
-**Import seed** in Setup. Layout:
+**Import seed** in Setup. Use the repo zip [`charcTool-housing-data-sample.zip`](../charcTool-housing-data-sample.zip), or any zip with this layout:
 
 ```
 organization.json
