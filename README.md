@@ -14,6 +14,8 @@ The app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no 
 
 Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick or shared zip.
 
+A simplified **Android district sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Use the **mesh** APK on the field phone; **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
+
 ## Prerequisites
 
 ### Both platforms
@@ -206,9 +208,9 @@ H003,GREEN,2026-08-14T05:21:42Z
 
 | Site | Radio | Laptop mode |
 |------|--------|-------------|
-| District | CLIENT (USB or BLE) | **Transmitter** — edit board, Sync to mesh, heartbeat on |
+| District | CLIENT (USB or BLE) | **Transmitter** — laptop Streamlit, or the Android sender APK |
 | Coverage / roofs | ROUTER | No laptop |
-| EOC | CLIENT | **Receiver** — apply incoming status |
+| EOC | CLIENT | **Receiver** — laptop only; apply incoming status |
 
 Sidebar → **Radio** → **Open field checklist** for the printable standup guide (channel, delays, smoke test, failure symptoms).
 
