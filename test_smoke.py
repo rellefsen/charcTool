@@ -384,6 +384,22 @@ def test_printable_board_html() -> None:
     print("printable_board: OK")
 
 
+def test_field_checklist_html() -> None:
+    from field_checklist import build_field_checklist_html
+
+    html = build_field_checklist_html(
+        channel_name="charcStatus",
+        packet_delay=2.0,
+        heartbeat_seconds=3600.0,
+    )
+    assert "Meshtastic field checklist" in html
+    assert "charcStatus" in html
+    assert "mock mode" in html
+    assert "NS:SOUTH01:HB:E" in html
+    assert "Do not go live" in html
+    print("field_checklist: OK")
+
+
 def test_text_messages() -> None:
     from packet_codec import is_status_packet
     from text_messages import (
@@ -658,6 +674,7 @@ if __name__ == "__main__":
         test_house_management(Path(tmp))
         test_bulk_address_import(Path(tmp))
     test_printable_board_html()
+    test_field_checklist_html()
     test_text_messages()
     test_node_display_name()
     test_text_message_dispatch()

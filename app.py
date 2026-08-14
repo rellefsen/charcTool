@@ -30,6 +30,7 @@ from address_store import (
     update_address,
 )
 from csv_store import ensure_status_csv, read_all, sort_rows_by_urgency, update_status
+from field_checklist import build_field_checklist_html
 from house_store import (
     HouseStoreError,
     add_house,
@@ -612,6 +613,34 @@ def _render_print_board_actions(
         )
 
 
+def _render_field_checklist_link() -> None:
+    """Open the Meshtastic field checklist in a browser popup."""
+    settings = st.session_state.app_settings
+    checklist_html = build_field_checklist_html(
+        channel_name=str(settings.get("channel_name", "charcStatus")),
+        packet_delay=float(settings.get("sync_packet_delay", 2.0)),
+        heartbeat_seconds=float(settings.get("heartbeat_interval_seconds", 3600.0)),
+    )
+    components.html(
+        f"""
+        <a id="field-checklist-link" href="#" style="
+            display: inline-block;
+            font-family: Source Sans Pro, sans-serif;
+            font-size: 0.95rem;
+        ">Open field checklist</a>
+        <script>
+        document.getElementById("field-checklist-link").onclick = function(event) {{
+            event.preventDefault();
+            var win = window.open("", "charcFieldChecklist", "width=900,height=800,scrollbars=yes");
+            win.document.write({json.dumps(checklist_html)});
+            win.document.close();
+        }};
+        </script>
+        """,
+        height=32,
+    )
+
+
 def _render_connection_banner() -> None:
     info = st.session_state.client.connect()
     if info.mock_mode:
@@ -853,6 +882,7 @@ def _render_sidebar() -> None:
 
         st.divider()
         st.subheader("Radio")
+        _render_field_checklist_link()
         info = st.session_state.client.connection_info()
         if info.mock_mode:
             st.caption("Status: **mock mode** (no radio)")
