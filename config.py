@@ -78,6 +78,14 @@ DEFAULT_STREET_NAME = "Oak St"
 # Meshtastic serial (None = auto-detect)
 MESHTASTIC_PORT: str | None = None
 
+CONNECTION_SERIAL = "serial"
+CONNECTION_BLUETOOTH = "bluetooth"
+CONNECTION_TYPES = (CONNECTION_SERIAL, CONNECTION_BLUETOOTH)
+
+# Default radio transport. Bluetooth needs a paired Meshtastic BLE device.
+MESHTASTIC_CONNECTION_TYPE = CONNECTION_SERIAL
+MESHTASTIC_BLE_ADDRESS: str | None = None
+
 # Meshtastic mesh channel for neighborhood status traffic
 MESHTASTIC_CHANNEL_NAME = "charcStatus"
 

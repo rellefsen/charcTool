@@ -128,7 +128,8 @@ def build_field_checklist_html(
       <tr><td>wantAck</td><td>Off (False)</td><td>Link ACKs are disabled. Reliability is delta sync + hourly heartbeat.</td></tr>
       <tr><td>Hop limit</td><td>Radio default (~3)</td><td>Raise if districts are more than a few hops from EOC. Start at 5 for city coverage.</td></tr>
       <tr><td>Packet delay</td><td>{delay_label}</td><td>Raise toward 4–6 s if LoRa is congested or packets vanish. Cap is 30 s.</td></tr>
-      <tr><td>Serial port</td><td>Auto-detect</td><td>If two radios are plugged in, pick the port in the sidebar.</td></tr>
+      <tr><td>Serial port</td><td>Auto-detect</td><td>If two USB radios are plugged in, pick the port in the sidebar.</td></tr>
+      <tr><td>Bluetooth</td><td>Optional</td><td>Pair in OS first, then Radio settings → Bluetooth → Scan. Close the phone app; only one BLE client at a time.</td></tr>
     </tbody>
   </table>
 
@@ -141,7 +142,7 @@ def build_field_checklist_html(
     <li>Set hop limit high enough for district → city routers → EOC (start at 5).</li>
     <li>Match modem preset on all nodes (LongFast is the usual default).</li>
     <li>District + EOC laptops: CLIENT. Roof/coverage nodes: ROUTER or ROUTER_LATE.</li>
-    <li>Confirm USB serial works: <code>meshtastic --info</code> before launching Streamlit.</li>
+    <li>Confirm the radio link: USB <code>meshtastic --info</code>, or Bluetooth <code>meshtastic --ble-scan</code> then <code>meshtastic --ble --info</code>.</li>
   </ol>
 
   <h2>2. Seed every laptop</h2>

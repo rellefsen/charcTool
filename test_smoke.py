@@ -161,10 +161,14 @@ def test_settings_store(tmp_path) -> None:
         assert defaults["active_precinct_id"] == "CHARC01"
         assert defaults["active_district_id"] == "CHARC"
         assert defaults["show_mock_testing"] is True
+        assert defaults["connection_type"] == "serial"
+        assert defaults["ble_address"] is None
 
         saved = settings_store.save_settings(
             {
                 "meshtastic_port": "/dev/ttyUSB0",
+                "connection_type": "bluetooth",
+                "ble_address": "AA:BB:CC:DD:EE:FF",
                 "channel_name": "blockA",
                 "sync_packet_delay": 3.5,
                 "active_precinct_id": "CHARC02",
@@ -174,8 +178,13 @@ def test_settings_store(tmp_path) -> None:
         )
         assert saved["active_precinct_id"] == "CHARC02"
         assert saved["show_mock_testing"] is False
+        assert saved["connection_type"] == "bluetooth"
+        assert saved["ble_address"] == "AA:BB:CC:DD:EE:FF"
         reloaded = settings_store.load_settings()
         assert reloaded == saved
+
+        invalid = settings_store.save_settings({"connection_type": "wifi"})
+        assert invalid["connection_type"] == "serial"
     finally:
         config.SETTINGS_PATH = orig
 
@@ -397,7 +406,23 @@ def test_field_checklist_html() -> None:
     assert "mock mode" in html
     assert "NS:SOUTH01:HB:E" in html
     assert "Do not go live" in html
+    assert "Bluetooth" in html
     print("field_checklist: OK")
+
+
+def test_parse_bluetoothctl_devices() -> None:
+    from meshtastic_client import _parse_bluetoothctl_devices
+
+    parsed = _parse_bluetoothctl_devices(
+        "Device C4:7F:51:AA:BB:CC Meshtastic_abcd\n"
+        "Device 11:22:33:44:55:66 Heltec V3\n"
+        "garbage\n"
+    )
+    assert parsed == [
+        ("C4:7F:51:AA:BB:CC", "Meshtastic_abcd"),
+        ("11:22:33:44:55:66", "Heltec V3"),
+    ]
+    print("parse_bluetoothctl_devices: OK")
 
 
 def test_text_messages() -> None:
@@ -675,6 +700,7 @@ if __name__ == "__main__":
         test_bulk_address_import(Path(tmp))
     test_printable_board_html()
     test_field_checklist_html()
+    test_parse_bluetoothctl_devices()
     test_text_messages()
     test_node_display_name()
     test_text_message_dispatch()

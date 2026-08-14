@@ -52,6 +52,10 @@ except Exception as exc:
     print(f"  Port scan skipped: {exc}")
 PY
 
+echo ""
+echo "Bluetooth: pair the radio in the OS first, then use Radio settings → Bluetooth in the app."
+echo "  CLI check: meshtastic --ble-scan"
+
 # Connection fallback smoke test
 echo ""
 echo "Testing Meshtastic connection fallback ..."
