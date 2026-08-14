@@ -8,3 +8,12 @@ data/neighborhood_status.csv
 data/app_settings.json
 data/organization.json
 data/precincts/
+
+# Android sender
+android-sender/.gradle/
+android-sender/.idea/
+android-sender/build/
+android-sender/app/build/
+android-sender/local.properties
+android-sender/*.iml
+
