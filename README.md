@@ -1,0 +1,189 @@
+# charcTool
+
+Neighborhood block-captain status board over **Meshtastic**. Operators mark houses RED / YELLOW / GREEN on a Streamlit board; district laptops transmit changes, and an EOC laptop listens and updates the same local CSVs.
+
+The app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no radio is present, it runs in **mock mode** so you can still edit boards and test the UI.
+
+## What it does
+
+- **Transmitter** — edit a precinct board, sync status changes to the mesh, send hourly heartbeats of all non-green houses.
+- **Receiver** — listen for `NS:` packets and apply them to local CSVs; on heartbeat end, clear RED/YELLOW houses that were not in the snapshot (missed GREEN).
+- **Organization** — districts and precincts, each with `house_addresses.csv` and `neighborhood_status.csv`.
+- **Manual seeding** — copy org and precinct files to every laptop. There is no over-air full data export.
+- **Text messages** — optional free-form chat on the same mesh channel.
+
+Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick or shared zip.
+
+## Prerequisites
+
+### Both platforms
+
+- **Python 3.10+** (3.11 or 3.12 recommended), with `pip` and the `venv` module
+- Git (to clone the repo)
+- A modern browser (the UI is Streamlit, usually at http://localhost:8501)
+- Optional: a Meshtastic radio (Heltec, RAK, T-Beam, etc.) on current firmware
+- Mesh channel name **`charcStatus`** on every radio, **same PSK**, same modem preset
+
+Without a radio the app still starts. Mesh send/receive is simulated until you connect one.
+
+### Linux
+
+- `python3`, `python3-venv`, `python3-pip`
+- USB serial: add your user to the **`dialout`** group (Debian/Ubuntu/Mint) or **`uucp`** (some distros), then log out and back in
+- Bluetooth: **BlueZ** (`bluez`), user in the **`bluetooth`** group, adapter powered on
+- Pair and **trust** the radio, then **disconnect** it in the OS. Leave it paired. If Mint/GNOME shows the device as Connected, the OS is holding the only BLE slot and the app cannot scan or connect.
+- Close the Meshtastic phone app while the laptop is using BLE (one client at a time)
+
+```bash
+sudo usermod -aG dialout,bluetooth "$USER"
+# log out and back in
+```
+
+### Windows
+
+- Python from [python.org](https://www.python.org/downloads/) — check **Add python.exe to PATH**
+- USB serial driver for the radio (often **CP210x**, **CH340**, or **STM32 VCP**)
+- Bluetooth: pair the radio in Windows Settings first, then connect from the app. Close the Meshtastic phone app.
+- PowerShell execution policy may block `setup.ps1` (see Windows install below)
+
+## Install
+
+Clone the repo, then run the setup script for your OS. It creates `.venv`, installs dependencies, and initializes default CSVs.
+
+### Linux
+
+```bash
+git clone https://github.com/rellefsen/charcTool.git
+cd charcTool
+chmod +x setup.sh
+./setup.sh
+```
+
+Start the app (each time, in a new terminal):
+
+```bash
+cd charcTool
+source .venv/bin/activate
+streamlit run app.py
+```
+
+### Windows
+
+In **PowerShell**, from the project folder:
+
+```powershell
+git clone https://github.com/rellefsen/charcTool.git
+cd charcTool
+```
+
+If scripts are blocked, run these as **two** separate commands:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\setup.ps1
+```
+
+Or run setup once without changing policy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Start the app:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+streamlit run app.py
+```
+
+Open the URL Streamlit prints (usually http://localhost:8501).
+
+### Manual install (either OS)
+
+```bash
+python3 -m venv .venv
+# Linux/macOS:
+source .venv/bin/activate
+# Windows:
+# .\.venv\Scripts\Activate.ps1
+
+pip install --upgrade pip
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Dependencies: Streamlit, Meshtastic Python API, Bleak (Bluetooth), pyserial, pandas, pypubsub.
+
+## First-time radio setup
+
+1. Flash current **Meshtastic** firmware on every radio.
+2. Give unique long names (example: `EOC-OPS`, `SOUTH-TX`).
+3. Create a **secondary** channel named `charcStatus` with the **same PSK** on every node. charcTool only uses that named channel.
+4. Match modem preset (LongFast is the usual default). Raise hop limit if districts are several hops from the EOC (start at 5).
+5. Laptop radios: **CLIENT**. Roof/coverage nodes: **ROUTER** or **ROUTER_LATE**.
+
+### USB
+
+1. Plug in the radio.
+2. In the app: sidebar → **Radio settings** → **Serial USB**.
+3. Pick the port or leave **Auto-detect** (if two radios are plugged in, pick one).
+4. **Apply & reconnect**. Status should show connected, not mock mode, and a channel index for `charcStatus`.
+
+Linux: if the port exists but open fails, you are probably missing the `dialout` group.
+
+### Bluetooth
+
+1. Pair and trust in the OS. Enter the PIN from the device screen (`bluetoothctl` on Linux).
+2. **Disconnect** in the OS so the app can take the GATT session.
+3. In the app: **Radio connection** → **Bluetooth** → **Scan** (~10 seconds), or paste the MAC.
+4. **Apply & reconnect**.
+
+CLI checks:
+
+```bash
+meshtastic --info              # USB
+meshtastic --ble-scan
+meshtastic --ble --info        # Bluetooth
+```
+
+## Seed house data on every laptop
+
+Every node needs the same organization and addresses. Status files start **all GREEN**.
+
+Copy:
+
+- `data/organization.json`
+- `data/precincts/{PRECINCT_ID}/house_addresses.csv`
+- `data/precincts/{PRECINCT_ID}/neighborhood_status.csv`
+
+Do **not** rely on Git for this; those paths are ignored. Use a USB stick or a zip (for example `organization.json` + `precincts/`).
+
+`data/app_settings.json` is per laptop (channel, serial vs Bluetooth, heartbeat interval). It is also gitignored.
+
+## Day-of operations
+
+| Site | Radio | Laptop mode |
+|------|--------|-------------|
+| District | CLIENT (USB or BLE) | **Transmitter** — edit board, Sync to mesh, heartbeat on |
+| Coverage / roofs | ROUTER | No laptop |
+| EOC | CLIENT | **Receiver** — apply incoming status |
+
+Sidebar → **Radio** → **Open field checklist** for the printable standup guide (channel, delays, smoke test, failure symptoms).
+
+Smoke test one district → EOC:
+
+1. Both connected (not mock), channel index shown.
+2. Send a short free-form text; EOC sees it.
+3. Mark one house YELLOW, **SYNC TO MESH**; EOC updates.
+4. Clear to GREEN (or **Send heartbeat now** if the clear was missed).
+
+Defaults: 233-byte text payloads, ~2 s pause between packets (raise to 4–6 s if packets drop), heartbeat every 60 minutes.
+
+## Tests
+
+```bash
+source .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
+python3 test_smoke.py       # Windows: python test_smoke.py
+```
+
+The `pubsub` test is skipped if `pypubsub` is not installed; setup scripts install it via `requirements.txt`.
