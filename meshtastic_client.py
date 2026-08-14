@@ -8,6 +8,7 @@ for development and CSV workflow testing.
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from collections import deque
@@ -15,7 +16,11 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from config import (
+    CONNECTION_BLUETOOTH,
+    CONNECTION_SERIAL,
+    MESHTASTIC_BLE_ADDRESS,
     MESHTASTIC_CHANNEL_NAME,
+    MESHTASTIC_CONNECTION_TYPE,
     MESHTASTIC_PORT,
     SYNC_PACKET_DELAY,
 )
@@ -60,6 +65,7 @@ class ConnectionInfo:
     message: str
     channel_name: str | None = None
     channel_index: int | None = None
+    connection_type: str = CONNECTION_SERIAL
 
 
 def _discover_meshtastic_port(explicit: str | None = None) -> str | None:
@@ -101,10 +107,12 @@ def _resolve_channel_index(iface: object, channel_name: str) -> int | None:
 
 @dataclass
 class MeshtasticClient:
-    """Thin wrapper around the Meshtastic serial API."""
+    """Thin wrapper around the Meshtastic serial or Bluetooth API."""
 
     dev_path: str | None = MESHTASTIC_PORT
     channel_name: str = MESHTASTIC_CHANNEL_NAME
+    connection_type: str = MESHTASTIC_CONNECTION_TYPE
+    ble_address: str | None = MESHTASTIC_BLE_ADDRESS
     _interface: object | None = field(default=None, init=False, repr=False)
     _mock_mode: bool = field(default=False, init=False)
     _connected_port: str | None = field(default=None, init=False)
@@ -194,72 +202,84 @@ class MeshtasticClient:
             return node_id
 
     def connect(self) -> ConnectionInfo:
-        """Attempt serial connection; fall back to mock mode on failure."""
+        """Attempt radio connection; fall back to mock mode on failure."""
         with self._lock:
             if self._interface is not None:
                 return self.connection_info()
             if self._mock_mode:
                 return self.connection_info()
 
-            port = _discover_meshtastic_port(self.dev_path)
-            if port is None:
-                return self._enter_mock_mode(
-                    "No Meshtastic radio detected — running in offline mock mode. "
-                    "CSV and UI work normally; mesh send/receive is simulated."
-                )
-
             try:
-                import meshtastic.serial_interface  # type: ignore[import-untyped]
-                from pubsub import pub  # type: ignore[import-untyped]
-
-                iface = meshtastic.serial_interface.SerialInterface(
-                    devPath=port,
-                    connectNow=True,
-                    timeout=15,
-                )
-
-                # SerialInterface can return a half-initialized object when probing fails.
-                stream = getattr(iface, "stream", None)
-                if stream is None:
-                    raise RuntimeError(f"Could not open serial port {port}")
-
-                self._interface = iface
-                self._connected_port = port
-                self._mock_mode = False
-                self._channel_index = _resolve_channel_index(iface, self.channel_name)
-
-                _set_active_client(self)
-                _ensure_global_pubsub()
-
-                if self._channel_index is None:
-                    message = (
-                        f"Connected to radio on {port}, but channel "
-                        f"'{self.channel_name}' was not found. "
-                        "Add it in the Meshtastic app, then click Reconnect."
-                    )
-                else:
-                    message = (
-                        f"Connected to radio on {port}, "
-                        f"channel '{self.channel_name}' (index {self._channel_index})"
-                    )
-
-                logger.info(message)
-                return ConnectionInfo(
-                    connected=True,
-                    mock_mode=False,
-                    port=port,
-                    message=message,
-                    channel_name=self.channel_name,
-                    channel_index=self._channel_index,
-                )
-
+                iface, display = self._open_interface()
             except Exception as exc:
                 logger.warning("Meshtastic unavailable, using mock mode: %s", exc)
                 self._reset_connection()
-                return self._enter_mock_mode(
-                    "No Meshtastic radio detected — running in offline mock mode. "
-                    "CSV and UI work normally; mesh send/receive is simulated."
+                return self._enter_mock_mode(_connect_failure_message(self.connection_type, exc))
+
+            self._interface = iface
+            self._connected_port = display
+            self._mock_mode = False
+            self._channel_index = _resolve_channel_index(iface, self.channel_name)
+
+            _set_active_client(self)
+            _ensure_global_pubsub()
+
+            if self._channel_index is None:
+                message = (
+                    f"Connected to radio on {display}, but channel "
+                    f"'{self.channel_name}' was not found. "
+                    "Add it in the Meshtastic app, then click Reconnect."
                 )
+            else:
+                message = (
+                    f"Connected to radio on {display}, "
+                    f"channel '{self.channel_name}' (index {self._channel_index})"
+                )
+
+            logger.info(message)
+            return ConnectionInfo(
+                connected=True,
+                mock_mode=False,
+                port=display,
+                message=message,
+                channel_name=self.channel_name,
+                channel_index=self._channel_index,
+                connection_type=self.connection_type,
+            )
+
+    def _open_interface(self) -> tuple[object, str]:
+        """Open a Meshtastic interface. Returns (interface, display name)."""
+        if self.connection_type == CONNECTION_BLUETOOTH:
+            import meshtastic.ble_interface  # type: ignore[import-untyped]
+
+            address = self.ble_address
+            if address:
+                _bluez_disconnect(address)
+                time.sleep(2.0)
+            iface = meshtastic.ble_interface.BLEInterface(address=address)
+            client = getattr(iface, "client", None)
+            display = (
+                address
+                or getattr(client, "address", None)
+                or "bluetooth"
+            )
+            return iface, f"bluetooth:{display}"
+
+        port = _discover_meshtastic_port(self.dev_path)
+        if port is None:
+            raise RuntimeError("No Meshtastic serial radio detected")
+
+        import meshtastic.serial_interface  # type: ignore[import-untyped]
+
+        iface = meshtastic.serial_interface.SerialInterface(
+            devPath=port,
+            connectNow=True,
+            timeout=15,
+        )
+        stream = getattr(iface, "stream", None)
+        if stream is None:
+            raise RuntimeError(f"Could not open serial port {port}")
+        return iface, port
 
     def _enter_mock_mode(self, message: str) -> ConnectionInfo:
         self._interface = None
@@ -274,6 +294,7 @@ class MeshtasticClient:
             message=message,
             channel_name=self.channel_name,
             channel_index=None,
+            connection_type=self.connection_type,
         )
 
     def connection_info(self) -> ConnectionInfo:
@@ -285,6 +306,7 @@ class MeshtasticClient:
                 message=f"Mock mode — no radio connected (channel: {self.channel_name})",
                 channel_name=self.channel_name,
                 channel_index=None,
+                connection_type=self.connection_type,
             )
         if self._channel_index is None and self._interface is not None:
             message = (
@@ -304,6 +326,7 @@ class MeshtasticClient:
             message=message,
             channel_name=self.channel_name,
             channel_index=self._channel_index,
+            connection_type=self.connection_type,
         )
 
     def send_text(self, text: str) -> tuple[bool, str]:
@@ -495,3 +518,103 @@ def list_serial_ports() -> list[str]:
         return meshtastic.util.findPorts(True)
     except Exception:
         return []
+
+
+def list_ble_devices() -> list[tuple[str, str]]:
+    """Discover Meshtastic BLE radios via advertisement scan plus OS paired list.
+
+    Advertisement scan typically takes about 10 seconds. Linux Mint often keeps a
+    paired radio *connected*, which hides it from the scan — those still appear
+    via bluetoothctl so the user can pick a MAC.
+    """
+    found: dict[str, str] = {}
+
+    try:
+        from meshtastic.ble_interface import BLEInterface  # type: ignore[import-untyped]
+
+        for device in BLEInterface.scan():
+            address = str(getattr(device, "address", "") or "").strip()
+            name = str(getattr(device, "name", "") or "").strip() or address
+            if address:
+                found[address.upper()] = name
+    except Exception:
+        logger.exception("BLE advertisement scan failed")
+
+    for address, name in _bluez_devices("Paired"):
+        found.setdefault(address.upper(), name)
+
+    logger.info("BLE discovery found %s device(s)", len(found))
+    return [(address, name) for address, name in found.items()]
+
+
+def list_ble_connected_addresses() -> set[str]:
+    """MAC addresses currently held by the OS Bluetooth stack."""
+    return {address.upper() for address, _ in _bluez_devices("Connected")}
+
+
+def _bluez_devices(kind: str) -> list[tuple[str, str]]:
+    """Parse `bluetoothctl devices Paired|Connected`. Empty on Windows / if missing."""
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "devices", kind],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    return _parse_bluetoothctl_devices(result.stdout)
+
+
+def _parse_bluetoothctl_devices(output: str) -> list[tuple[str, str]]:
+    devices: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) < 2 or parts[0] != "Device":
+            continue
+        address = parts[1].strip()
+        name = parts[2].strip() if len(parts) > 2 else address
+        if address:
+            devices.append((address, name))
+    return devices
+
+
+def _bluez_disconnect(address: str) -> None:
+    """Drop an OS-held BLE connection so Meshtastic can take the GATT session."""
+    address = address.strip()
+    if not address:
+        return
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "disconnect", address],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        logger.info(
+            "bluetoothctl disconnect %s: %s",
+            address,
+            (result.stdout or result.stderr or "").strip() or result.returncode,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("bluetoothctl disconnect skipped: %s", exc)
+
+
+def _connect_failure_message(connection_type: str, exc: Exception) -> str:
+    detail = str(exc).strip() or exc.__class__.__name__
+    if connection_type == CONNECTION_BLUETOOTH:
+        return (
+            "Bluetooth connect failed — running in offline mock mode. "
+            f"{detail} "
+            "On Linux Mint: pair and trust the radio, then Disconnect it in "
+            "Bluetooth settings (stay paired). The OS connection hides the "
+            "radio from scan and blocks the app. Close the Meshtastic phone app too."
+        )
+    return (
+        "No Meshtastic radio detected — running in offline mock mode. "
+        "CSV and UI work normally; mesh send/receive is simulated."
+    )

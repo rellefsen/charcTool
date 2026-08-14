@@ -84,6 +84,10 @@ except Exception as exc:
 "@
 
 Write-Host ""
+Write-Host "Bluetooth: pair the radio in the OS first, then use Radio settings -> Bluetooth in the app."
+Write-Host "  CLI check: meshtastic --ble-scan"
+
+Write-Host ""
 Write-Host "Testing Meshtastic connection fallback ..."
 Invoke-Python -c @"
 from meshtastic_client import MeshtasticClient

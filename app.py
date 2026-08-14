@@ -12,6 +12,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from config import (
+    CONNECTION_BLUETOOTH,
+    CONNECTION_SERIAL,
     STATUS_BG,
     STATUS_CODES,
     STATUS_COLORS,
@@ -44,6 +46,8 @@ from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
     _set_active_client,
+    list_ble_connected_addresses,
+    list_ble_devices,
     list_serial_ports,
 )
 from packet_codec import encode_bulk_sync_chunks
@@ -92,6 +96,8 @@ def _create_client(settings: dict) -> MeshtasticClient:
     return MeshtasticClient(
         dev_path=settings.get("meshtastic_port"),
         channel_name=str(settings["channel_name"]),
+        connection_type=str(settings.get("connection_type", CONNECTION_SERIAL)),
+        ble_address=settings.get("ble_address"),
     )
 
 
@@ -887,29 +893,102 @@ def _render_sidebar() -> None:
         if info.mock_mode:
             st.caption("Status: **mock mode** (no radio)")
         elif info.port:
-            st.caption(f"Connected: `{info.port}`")
+            label = "Bluetooth" if info.connection_type == CONNECTION_BLUETOOTH else "Serial"
+            st.caption(f"Connected ({label}): `{info.port}`")
         st.caption(f"Mesh channel: **{info.channel_name}**")
         if info.channel_index is not None:
             st.caption(f"Channel index: {info.channel_index}")
 
         with st.expander("Radio settings", expanded=False):
             settings = st.session_state.app_settings
-            ports = list_serial_ports()
-            port_options = ["Auto-detect", *ports]
-            current_port = settings.get("meshtastic_port")
-            if current_port and current_port not in port_options:
-                port_options.append(current_port)
-            port_index = (
-                port_options.index(current_port)
-                if current_port in port_options
-                else 0
+            connection_label = st.radio(
+                "Radio connection",
+                ["Serial USB", "Bluetooth"],
+                index=1 if settings.get("connection_type") == CONNECTION_BLUETOOTH else 0,
+                help="USB serial is the default. Bluetooth uses Meshtastic BLE; pair the radio in the OS first.",
+                key="radio_connection_type",
             )
-            selected_port = st.selectbox(
-                "Serial port",
-                port_options,
-                index=port_index,
-                help="Choose a specific USB port or auto-detect the radio.",
+            connection_type = (
+                CONNECTION_BLUETOOTH if connection_label == "Bluetooth" else CONNECTION_SERIAL
             )
+
+            selected_port = settings.get("meshtastic_port")
+            selected_ble = settings.get("ble_address")
+            if connection_type == CONNECTION_SERIAL:
+                ports = list_serial_ports()
+                port_options = ["Auto-detect", *ports]
+                current_port = settings.get("meshtastic_port")
+                if current_port and current_port not in port_options:
+                    port_options.append(current_port)
+                port_index = (
+                    port_options.index(current_port)
+                    if current_port in port_options
+                    else 0
+                )
+                selected_option = st.selectbox(
+                    "Serial port",
+                    port_options,
+                    index=port_index,
+                    help="Choose a specific USB port or auto-detect the radio.",
+                )
+                selected_port = None if selected_option == "Auto-detect" else selected_option
+            else:
+                st.caption(
+                    "Pair **and trust** the radio in Mint, then **Disconnect** it "
+                    "(leave it paired). If Mint shows Connected, the OS is holding "
+                    "the only BLE slot and the app scan will find nothing. "
+                    "Close the Meshtastic phone app too."
+                )
+                connected_now = list_ble_connected_addresses()
+                if connected_now:
+                    st.warning(
+                        "Mint is still connected to: "
+                        + ", ".join(sorted(connected_now))
+                        + ". Disconnect there, then scan again. "
+                        "Apply will also try to disconnect before connecting."
+                    )
+                if st.button("Scan for Bluetooth radios", use_container_width=True, key="ble_scan_btn"):
+                    with st.spinner("Scanning advertisements (~10s) and listing paired radios..."):
+                        st.session_state.ble_scan_results = list_ble_devices()
+                    found = st.session_state.ble_scan_results
+                    if found:
+                        st.toast(f"Found {len(found)} Bluetooth radio(s)")
+                    else:
+                        st.toast("No radios found — disconnect in Mint, or type the MAC below")
+
+                scanned = list(st.session_state.get("ble_scan_results") or [])
+                ble_options = ["Auto-detect"]
+                ble_lookup: dict[str, str | None] = {"Auto-detect": None}
+                for address, name in scanned:
+                    label = f"{name} ({address})" if name and name != address else address
+                    ble_options.append(label)
+                    ble_lookup[label] = address
+                current_ble = settings.get("ble_address")
+                if current_ble and current_ble not in ble_lookup.values():
+                    ble_options.append(current_ble)
+                    ble_lookup[current_ble] = current_ble
+                default_index = 0
+                if current_ble:
+                    for idx, label in enumerate(ble_options):
+                        if ble_lookup.get(label) == current_ble:
+                            default_index = idx
+                            break
+                selected_ble_label = st.selectbox(
+                    "Bluetooth radio",
+                    ble_options,
+                    index=default_index,
+                    help="Paired radios appear even if they are not advertising.",
+                )
+                selected_ble = ble_lookup.get(selected_ble_label)
+                manual_ble = st.text_input(
+                    "Or enter name / MAC",
+                    value="" if selected_ble else str(current_ble or ""),
+                    help="Example: C4:7F:51:12:34:56 or the radio long name.",
+                    key="ble_manual_address",
+                ).strip()
+                if manual_ble:
+                    selected_ble = manual_ble
+
             channel_name = st.text_input(
                 "Mesh channel name",
                 value=settings["channel_name"],
@@ -927,9 +1006,10 @@ def _render_sidebar() -> None:
                 try:
                     new_settings = save_settings(
                         {
-                            "meshtastic_port": None
-                            if selected_port == "Auto-detect"
-                            else selected_port,
+                            **st.session_state.app_settings,
+                            "connection_type": connection_type,
+                            "meshtastic_port": selected_port,
+                            "ble_address": selected_ble,
                             "channel_name": channel_name,
                             "sync_packet_delay": sync_delay,
                         }

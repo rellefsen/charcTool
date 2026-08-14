@@ -7,10 +7,14 @@ import threading
 from typing import Any
 
 from config import (
+    CONNECTION_SERIAL,
+    CONNECTION_TYPES,
     DEFAULT_DISTRICT_ID,
     DEFAULT_PRECINCT_ID,
     HEARTBEAT_INTERVAL_SECONDS,
+    MESHTASTIC_BLE_ADDRESS,
     MESHTASTIC_CHANNEL_NAME,
+    MESHTASTIC_CONNECTION_TYPE,
     MESHTASTIC_PORT,
     SYNC_PACKET_DELAY,
 )
@@ -20,6 +24,8 @@ _lock = threading.Lock()
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "meshtastic_port": MESHTASTIC_PORT,
+    "connection_type": MESHTASTIC_CONNECTION_TYPE,
+    "ble_address": MESHTASTIC_BLE_ADDRESS,
     "channel_name": MESHTASTIC_CHANNEL_NAME,
     "sync_packet_delay": SYNC_PACKET_DELAY,
     "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
@@ -44,6 +50,19 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
         settings["meshtastic_port"] = port.strip() or None
     else:
         settings["meshtastic_port"] = str(port)
+
+    connection_type = str(
+        raw.get("connection_type", settings["connection_type"])
+    ).strip().lower()
+    settings["connection_type"] = (
+        connection_type if connection_type in CONNECTION_TYPES else CONNECTION_SERIAL
+    )
+
+    ble_address = raw.get("ble_address", settings["ble_address"])
+    if ble_address is None or ble_address == "":
+        settings["ble_address"] = None
+    else:
+        settings["ble_address"] = str(ble_address).strip() or None
 
     channel = raw.get("channel_name", settings["channel_name"])
     settings["channel_name"] = str(channel).strip()
