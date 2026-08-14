@@ -150,7 +150,7 @@ fun SenderScreen(
     onHeartbeat: () -> Unit,
 ) {
     Scaffold(
-        topBar = { TopAppBar(title = { Text("charcTool sender") }) },
+        topBar = { TopAppBar(title = { Text("Block Status") }) },
     ) { padding ->
         var setupOpen by remember { mutableStateOf(!state.hasSeed || !state.radioConnected) }
         LaunchedEffect(state.scanning) {

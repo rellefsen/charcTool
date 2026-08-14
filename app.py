@@ -1,4 +1,4 @@
-"""Neighborhood Block Captain — Meshtastic emergency status tool."""
+"""Block Status — neighborhood board over Meshtastic."""
 
 from __future__ import annotations
 
@@ -506,7 +506,7 @@ def _init_session_state() -> None:
 # Page config & accessible styling
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Block Captain Status",
+    page_title="Block Status",
     page_icon="📻",
     layout="wide",
     initial_sidebar_state="expanded",

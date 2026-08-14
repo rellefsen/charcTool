@@ -1,8 +1,10 @@
-# charcTool
+# Block Status
 
-Neighborhood block-captain status board over **Meshtastic**. Operators mark houses RED / YELLOW / GREEN on a Streamlit board; district laptops transmit changes, and an EOC laptop listens and updates the same local CSVs.
+Neighborhood block-captain status board over **Meshtastic**. Operators mark houses RED / YELLOW / GREEN; district laptops or phones transmit changes, and an EOC laptop listens and updates the same local CSVs.
 
-The app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no radio is present, it runs in **mock mode** so you can still edit boards and test the UI.
+The GitHub repo is still [`rellefsen/charcTool`](https://github.com/rellefsen/charcTool). The mesh channel stays **`charcStatus`**. Packet format is unchanged.
+
+The laptop app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no radio is present, it runs in **mock mode** so you can still edit boards and test the UI.
 
 ## What it does
 
@@ -14,7 +16,7 @@ The app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no 
 
 Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick or shared zip.
 
-A simplified **Android district sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Use the **mesh** APK on the field phone; **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
+A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Use the **mesh** APK on the field phone; **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
 
 ## Prerequisites
 
@@ -120,7 +122,7 @@ Dependencies: Streamlit, Meshtastic Python API, Bleak (Bluetooth), pyserial, pan
 
 1. Flash current **Meshtastic** firmware on every radio.
 2. Give unique long names (example: `EOC-OPS`, `SOUTH-TX`).
-3. Create a **secondary** channel named `charcStatus` with the **same PSK** on every node. charcTool only uses that named channel.
+3. Create a **secondary** channel named `charcStatus` with the **same PSK** on every node. Block Status only uses that named channel.
 4. Match modem preset (LongFast is the usual default). Raise hop limit if districts are several hops from the EOC (start at 5).
 5. Laptop radios: **CLIENT**. Roof/coverage nodes: **ROUTER** or **ROUTER_LATE**.
 

@@ -23,7 +23,7 @@ def build_field_checklist_html(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Meshtastic field checklist</title>
+<title>Block Status field checklist</title>
 <style>
   body {{
     font-family: Arial, Helvetica, sans-serif;
@@ -90,9 +90,9 @@ def build_field_checklist_html(
 </head>
 <body>
   <div class="print-bar"><button onclick="window.print()">Print checklist</button></div>
-  <h1>Meshtastic field checklist</h1>
+  <h1>Block Status field checklist</h1>
   <div class="meta">
-    Radio stack is Meshtastic only. charcTool sends UTF-8 text on a named channel.
+    Radio stack is Meshtastic only. Block Status sends UTF-8 text on a named channel.
     Path hash, companions, and MeshCore firmware are out of scope.
   </div>
   <div class="stats">
@@ -118,9 +118,9 @@ def build_field_checklist_html(
   </table>
 
   <h2>Radio settings (Meshtastic app / CLI)</h2>
-  <p>charcTool does not write hop limit, PSK, or modem preset. Those live on the radio. The app only looks up the channel named in settings.</p>
+  <p>Block Status does not write hop limit, PSK, or modem preset. Those live on the radio. The app only looks up the channel named in settings.</p>
   <table>
-    <thead><tr><th>Setting</th><th>charcTool default</th><th>Field rule</th></tr></thead>
+    <thead><tr><th>Setting</th><th>Block Status default</th><th>Field rule</th></tr></thead>
     <tbody>
       <tr><td>Channel name</td><td><code>{channel}</code></td><td>Exact match on every radio. Missing name = connected but cannot send.</td></tr>
       <tr><td>Channel PSK</td><td>Set on radio</td><td>Identical secret on every node. Name match is not enough.</td></tr>
@@ -138,7 +138,7 @@ def build_field_checklist_html(
     <li>Flash current Meshtastic firmware on every radio (district + EOC).</li>
     <li>Set unique long names: EOC-OPS, SOUTH-TX, NORTH-TX, etc.</li>
     <li>Create a secondary channel named <code>{channel}</code> on every radio. Same PSK.</li>
-    <li>Leave Primary as admin/chat if you want; charcTool only uses <code>{channel}</code>.</li>
+    <li>Leave Primary as admin/chat if you want; Block Status only uses <code>{channel}</code>.</li>
     <li>Set hop limit high enough for district → city routers → EOC (start at 5).</li>
     <li>Match modem preset on all nodes (LongFast is the usual default).</li>
     <li>District + EOC laptops: CLIENT. Roof/coverage nodes: ROUTER or ROUTER_LATE.</li>
@@ -178,7 +178,7 @@ def build_field_checklist_html(
     <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
     <tbody>
       <tr><td>Status: mock mode</td><td>No serial radio, or Python cannot open the port</td><td>Unplug/replug USB, install drivers, pick port, reconnect.</td></tr>
-      <tr><td>Connected, channel not found</td><td>Radio has no channel named {channel}</td><td>Add the channel in Meshtastic, same PSK, reconnect charcTool.</td></tr>
+      <tr><td>Connected, channel not found</td><td>Radio has no channel named {channel}</td><td>Add the channel in Meshtastic, same PSK, reconnect Block Status.</td></tr>
       <tr><td>EOC never updates</td><td>Different channel index/PSK, or hop limit too low</td><td>Send a plain text first. If text fails, it is radio config, not the CSV.</td></tr>
       <tr><td>Only some packets arrive</td><td>Airtime collision / delay too short</td><td>Raise sync delay to 4–6 s. Keep heartbeats on.</td></tr>
       <tr><td>EOC stuck RED after a clear</td><td>Missed GREEN delta</td><td>Send heartbeat now. HB:E reconciles houses not in the non-green snapshot.</td></tr>
