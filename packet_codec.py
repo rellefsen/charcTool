@@ -394,5 +394,5 @@ def is_control_packet(text: str) -> bool:
 
 
 def is_mesh_protocol_packet(text: str) -> bool:
-    """Return True for any charcTool mesh protocol message (not free-form text)."""
+    """Return True for any Block Status mesh protocol message (not free-form text)."""
     return is_status_packet(text) or is_control_packet(text)

@@ -1,10 +1,10 @@
-# charcTool district status sender (Android)
+# Block Status sender (Android)
 
-Phone app for **district transmitters only**. Mark houses RED / YELLOW / GREEN and send the same Meshtastic text packets as the laptop app.
+Phone app for **district transmitters only**. Mark houses RED / YELLOW / GREEN and send the same Meshtastic text packets as the laptop **Block Status** app.
 
-It does **not** receive, reconcile heartbeats, or edit districts/precincts. EOC still runs full charcTool on a laptop.
+It does **not** receive, reconcile heartbeats, or edit districts/precincts. EOC still runs full Block Status on a laptop.
 
-Do not run this app and a laptop transmitter on the same precinct at the same time.
+The home-screen name is **Block Status**. The mesh channel is still **`charcStatus`**. Do not run this app and a laptop transmitter on the same precinct at the same time.
 
 ## What it sends
 

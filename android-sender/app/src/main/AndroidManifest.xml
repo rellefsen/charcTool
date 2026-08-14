@@ -17,7 +17,7 @@
         android:name=".SenderApp"
         android:allowBackup="true"
         android:icon="@android:drawable/ic_dialog_map"
-        android:label="charcTool Sender"
+        android:label="Block Status"
         android:supportsRtl="true"
         android:theme="@style/Theme.CharcSender">
         <activity
