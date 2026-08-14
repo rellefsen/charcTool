@@ -150,15 +150,57 @@ meshtastic --ble --info        # Bluetooth
 
 Every node needs the same organization and addresses. Status files start **all GREEN**.
 
-Copy:
+Copy these three kinds of files:
 
-- `data/organization.json`
-- `data/precincts/{PRECINCT_ID}/house_addresses.csv`
-- `data/precincts/{PRECINCT_ID}/neighborhood_status.csv`
+| File | Path |
+|------|------|
+| Organization | `data/organization.json` |
+| Addresses | `data/precincts/{PRECINCT_ID}/house_addresses.csv` |
+| Status | `data/precincts/{PRECINCT_ID}/neighborhood_status.csv` |
 
 Do **not** rely on Git for this; those paths are ignored. Use a USB stick or a zip (for example `organization.json` + `precincts/`).
 
 `data/app_settings.json` is per laptop (channel, serial vs Bluetooth, heartbeat interval). It is also gitignored.
+
+### `organization.json`
+
+District IDs are 2–8 letters or numbers. Precinct IDs are the district ID plus a 2–4 character suffix (total 4–12 characters), all uppercase.
+
+```json
+{
+  "districts": [
+    { "id": "CHARC", "name": "North District" },
+    { "id": "SOUTH", "name": "South District" }
+  ],
+  "precincts": [
+    { "id": "CHARC01", "district_id": "CHARC", "name": "North Precinct 01" },
+    { "id": "CHARC02", "district_id": "CHARC", "name": "North Precinct 02" },
+    { "id": "SOUTH01", "district_id": "SOUTH", "name": "South Precinct 01" }
+  ]
+}
+```
+
+### `house_addresses.csv`
+
+One file per precinct. Header required. `house_id` must match the status file (typically `H001` style, up to 8 characters).
+
+```csv
+house_id,address
+H001,1 Oak St
+H002,2 Oak St
+H003,142 Pine Ave
+```
+
+### `neighborhood_status.csv`
+
+One file per precinct. Header required. `status_code` is `RED`, `YELLOW`, or `GREEN`. `timestamp` is UTC ISO-8601 with a `Z`. Seed every house **GREEN**.
+
+```csv
+house_id,status_code,timestamp
+H001,GREEN,2026-08-14T05:21:42Z
+H002,GREEN,2026-08-14T05:21:42Z
+H003,GREEN,2026-08-14T05:21:42Z
+```
 
 ## Day-of operations
 
