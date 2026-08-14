@@ -69,9 +69,6 @@ STATUS_URGENCY = {
 # Mesh packet prefix — identifies neighborhood-status messages
 PACKET_PREFIX = "NS"
 
-# Mesh packet prefix — organization/address export (full data sync)
-DATA_PACKET_PREFIX = "ND"
-
 # Default sample houses for first-time setup (60 houses exercises multi-packet bulk sync)
 DEFAULT_HOUSES = [f"H{i:03d}" for i in range(1, 61)]
 
@@ -93,13 +90,8 @@ MESH_MAX_PAYLOAD_BYTES = 233
 # Delay between chunked sync packets so LoRa can finish each transmission
 SYNC_PACKET_DELAY = 2.0
 
-# Full data export pacing and application-level ACK/retry
-EXPORT_PACKET_DELAY = 2.0
-EXPORT_ACK_TIMEOUT = 8.0
-EXPORT_MAX_RETRIES = 2
-EXPORT_ACK_WINDOW = 3
-EXPORT_MIN_PACKET_DELAY = 0.5
+# Hourly heartbeat of all non-green houses (seconds)
+HEARTBEAT_INTERVAL_SECONDS = 3600.0
 
-# After a full data export, keep accepting status packets for this many seconds
-# (mesh packets can arrive out of order)
-IMPORT_GRACE_SECONDS = 300.0
+# Include explicit GREEN clears for this long after a house is cleared (seconds)
+RECENT_CLEARS_WINDOW_SECONDS = 10800.0

@@ -9,11 +9,7 @@ from typing import Any
 from config import (
     DEFAULT_DISTRICT_ID,
     DEFAULT_PRECINCT_ID,
-    EXPORT_ACK_TIMEOUT,
-    EXPORT_ACK_WINDOW,
-    EXPORT_MAX_RETRIES,
-    EXPORT_MIN_PACKET_DELAY,
-    EXPORT_PACKET_DELAY,
+    HEARTBEAT_INTERVAL_SECONDS,
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_PORT,
     SYNC_PACKET_DELAY,
@@ -26,11 +22,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "meshtastic_port": MESHTASTIC_PORT,
     "channel_name": MESHTASTIC_CHANNEL_NAME,
     "sync_packet_delay": SYNC_PACKET_DELAY,
-    "export_packet_delay": EXPORT_PACKET_DELAY,
-    "export_ack_timeout": EXPORT_ACK_TIMEOUT,
-    "export_max_retries": EXPORT_MAX_RETRIES,
-    "export_ack_window": EXPORT_ACK_WINDOW,
-    "export_min_packet_delay": EXPORT_MIN_PACKET_DELAY,
+    "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+    "heartbeat_enabled": True,
     "active_precinct_id": DEFAULT_PRECINCT_ID,
     "active_district_id": DEFAULT_DISTRICT_ID,
     "show_mock_testing": True,
@@ -61,33 +54,18 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise SettingsError("Sync delay must be a number.") from exc
 
-    export_delay = raw.get("export_packet_delay", settings["export_packet_delay"])
+    heartbeat_interval = raw.get(
+        "heartbeat_interval_seconds",
+        settings["heartbeat_interval_seconds"],
+    )
     try:
-        settings["export_packet_delay"] = float(export_delay)
+        settings["heartbeat_interval_seconds"] = float(heartbeat_interval)
     except (TypeError, ValueError) as exc:
-        raise SettingsError("Export delay must be a number.") from exc
+        raise SettingsError("Heartbeat interval must be a number.") from exc
 
-    ack_timeout = raw.get("export_ack_timeout", settings["export_ack_timeout"])
-    try:
-        settings["export_ack_timeout"] = float(ack_timeout)
-    except (TypeError, ValueError) as exc:
-        raise SettingsError("Export ACK timeout must be a number.") from exc
-
-    try:
-        settings["export_max_retries"] = int(raw.get("export_max_retries", settings["export_max_retries"]))
-    except (TypeError, ValueError) as exc:
-        raise SettingsError("Export max retries must be a whole number.") from exc
-
-    try:
-        settings["export_ack_window"] = int(raw.get("export_ack_window", settings["export_ack_window"]))
-    except (TypeError, ValueError) as exc:
-        raise SettingsError("Export ACK window must be a whole number.") from exc
-
-    export_min_delay = raw.get("export_min_packet_delay", settings["export_min_packet_delay"])
-    try:
-        settings["export_min_packet_delay"] = float(export_min_delay)
-    except (TypeError, ValueError) as exc:
-        raise SettingsError("Export minimum delay must be a number.") from exc
+    settings["heartbeat_enabled"] = bool(
+        raw.get("heartbeat_enabled", settings["heartbeat_enabled"])
+    )
 
     precinct = str(raw.get("active_precinct_id", settings["active_precinct_id"])).strip().upper()
     district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()
@@ -110,35 +88,11 @@ def validate_settings(settings: dict[str, Any]) -> None:
     if delay > 30:
         raise SettingsError("Sync delay must be 30 seconds or less.")
 
-    export_delay = float(settings["export_packet_delay"])
-    if export_delay < 0:
-        raise SettingsError("Export delay cannot be negative.")
-    if export_delay > 60:
-        raise SettingsError("Export delay must be 60 seconds or less.")
-
-    ack_timeout = float(settings["export_ack_timeout"])
-    if ack_timeout < 1:
-        raise SettingsError("Export ACK timeout must be at least 1 second.")
-    if ack_timeout > 120:
-        raise SettingsError("Export ACK timeout must be 120 seconds or less.")
-
-    retries = int(settings["export_max_retries"])
-    if retries < 1:
-        raise SettingsError("Export max retries must be at least 1.")
-    if retries > 10:
-        raise SettingsError("Export max retries must be 10 or less.")
-
-    ack_window = int(settings["export_ack_window"])
-    if ack_window < 1:
-        raise SettingsError("Export ACK window must be at least 1.")
-    if ack_window > 20:
-        raise SettingsError("Export ACK window must be 20 or less.")
-
-    min_delay = float(settings["export_min_packet_delay"])
-    if min_delay < 0:
-        raise SettingsError("Export minimum delay cannot be negative.")
-    if min_delay > export_delay:
-        raise SettingsError("Export minimum delay cannot exceed export delay.")
+    heartbeat_interval = float(settings["heartbeat_interval_seconds"])
+    if heartbeat_interval < 60:
+        raise SettingsError("Heartbeat interval must be at least 60 seconds.")
+    if heartbeat_interval > 86400:
+        raise SettingsError("Heartbeat interval must be 24 hours or less.")
 
 
 def load_settings() -> dict[str, Any]:
@@ -147,31 +101,21 @@ def load_settings() -> dict[str, Any]:
     with _lock:
         if not target.exists():
             return DEFAULT_SETTINGS.copy()
-
         try:
             raw = json.loads(target.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return DEFAULT_SETTINGS.copy()
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SettingsError(f"Could not read settings from {target}") from exc
 
-        if not isinstance(raw, dict):
-            return DEFAULT_SETTINGS.copy()
-
-        try:
-            return _coerce_settings(raw)
-        except SettingsError:
-            return DEFAULT_SETTINGS.copy()
+    return _coerce_settings(raw)
 
 
 def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """Validate and persist settings to disk."""
-    normalized = _coerce_settings(settings)
+    validated = _coerce_settings(settings)
     target = config.SETTINGS_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
 
     with _lock:
-        target.write_text(
-            json.dumps(normalized, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        target.write_text(json.dumps(validated, indent=2, sort_keys=True), encoding="utf-8")
 
-    return normalized
+    return validated

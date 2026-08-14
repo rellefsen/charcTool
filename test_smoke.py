@@ -384,6 +384,22 @@ def test_printable_board_html() -> None:
     print("printable_board: OK")
 
 
+def test_field_checklist_html() -> None:
+    from field_checklist import build_field_checklist_html
+
+    html = build_field_checklist_html(
+        channel_name="charcStatus",
+        packet_delay=2.0,
+        heartbeat_seconds=3600.0,
+    )
+    assert "Meshtastic field checklist" in html
+    assert "charcStatus" in html
+    assert "mock mode" in html
+    assert "NS:SOUTH01:HB:E" in html
+    assert "Do not go live" in html
+    print("field_checklist: OK")
+
+
 def test_text_messages() -> None:
     from packet_codec import is_status_packet
     from text_messages import (
@@ -537,204 +553,70 @@ def test_global_pubsub_routing() -> None:
     print("global_pubsub_routing: OK")
 
 
-def test_mesh_data_export(tmp_path) -> None:
-    import time
-
+def test_heartbeat_reconcile(tmp_path) -> None:
     import config
-    import address_store
     import csv_store
     import precinct_store
-    from mesh_data_codec import (
-        MeshDataKind,
-        build_full_export_packets,
-        decode_mesh_data,
-        encode_address_chunks,
-        encode_district,
-        encode_export_end,
-        encode_export_start,
-        encode_precinct,
-    )
+    from packet_codec import build_heartbeat_packets, encode_heartbeat_end, encode_heartbeat_start
     from receiver import MeshReceiver
-    from text_messages import clear_messages, drain_pending, record_received
 
     orig_org = config.ORGANIZATION_PATH
     orig_precincts = config.PRECINCTS_DIR
-    config.ORGANIZATION_PATH = tmp_path / "tx" / "organization.json"
-    config.PRECINCTS_DIR = tmp_path / "tx" / "precincts"
+    config.ORGANIZATION_PATH = tmp_path / "organization.json"
+    config.PRECINCTS_DIR = tmp_path / "precincts"
 
     try:
         precinct_store.init_organization()
-        precinct_store.add_district("SOUTH", "South District")
-        precinct_store.add_precinct("SOUTH", "01", "South Precinct 01")
-        paths = precinct_store.paths_for_precinct("SOUTH01")
+        paths = precinct_store.paths_for_precinct("CHARC01")
         csv_store.init_csv(paths.status)
-        address_store.init_addresses(paths.addresses)
-        address_store.update_address("H001", "42 Pine St", path=paths.addresses)
         csv_store.update_status("H001", "RED", path=paths.status)
+        csv_store.update_status("H002", "YELLOW", path=paths.status)
+        csv_store.update_status("H003", "GREEN", path=paths.status)
 
-        assert decode_mesh_data(encode_export_start()).kind == MeshDataKind.START
-        assert decode_mesh_data(encode_export_end()).kind == MeshDataKind.END
-        district_packet = encode_district("SOUTH", "South District")
-        decoded_district = decode_mesh_data(district_packet)
-        assert decoded_district is not None
-        assert decoded_district.kind == MeshDataKind.DISTRICT
-        assert decoded_district.district_id == "SOUTH"
-
-        address_packets = encode_address_chunks(
-            "SOUTH01",
-            [("H001", "42 Pine St"), ("H002", "99 Elm Avenue")],
-            max_bytes=45,
+        packets = build_heartbeat_packets(
+            "CHARC01",
+            [("H001", "RED")],
+            [("H004", "GREEN")],
         )
-        assert len(address_packets) >= 2
-        decoded_addresses = decode_mesh_data(address_packets[0])
-        assert decoded_addresses is not None
-        assert decoded_addresses.kind == MeshDataKind.ADDRESSES
-        assert decoded_addresses.addresses[0].house_id == "H001"
-
-        packets = build_full_export_packets()
-        assert packets[0].upper().startswith("ND:S:")
-        assert packets[-1].upper().startswith("ND:Z:")
-        assert any("ND:D:SOUTH" in p.upper() for p in packets)
-        assert any("ND:P:SOUTH01" in p.upper() for p in packets)
-        assert any("ND:A:SOUTH01" in p.upper() for p in packets)
-        assert any("NS:SOUTH01:B:" in p.upper() for p in packets)
-
-        clear_messages()
-        assert record_received(encode_district("SOUTH", "South District")) is None
-        assert record_received("Hello operator") is not None
-        clear_messages()
-
-        config.ORGANIZATION_PATH = tmp_path / "rx" / "organization.json"
-        config.PRECINCTS_DIR = tmp_path / "rx" / "precincts"
-        precinct_store.init_organization()
+        assert packets[0] == encode_heartbeat_start("CHARC01")
+        assert packets[-1] == encode_heartbeat_end("CHARC01")
 
         client = MeshtasticClient()
         receiver = MeshReceiver(client)
         for packet in packets:
             receiver._handle_message(packet)
 
-        assert "SOUTH" in {d.id for d in precinct_store.list_districts()}
-        assert "SOUTH01" in precinct_store.precinct_ids_for_district("SOUTH")
-        recv_paths = precinct_store.paths_for_precinct("SOUTH01")
-        addresses = address_store.read_address_map(recv_paths.addresses)
-        assert addresses.get("H001") == "42 Pine St"
-        rows = csv_store.read_all(recv_paths.status)
-        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
-        assert receiver.stats.import_mode is False
-        assert receiver.stats.data_imports_applied > 0
-
-        # Status packets can arrive after the end marker on lossy mesh links.
-        receiver.stats.import_mode = False
-        receiver.stats.import_grace_until = time.time() + 300
-        receiver._handle_message("NS:SOUTH01:B:H001R,H002Y")
-        rows = csv_store.read_all(recv_paths.status)
-        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
-        assert any(r["house_id"] == "H002" and r["status_code"] == "YELLOW" for r in rows)
+        rows = {row["house_id"]: row["status_code"] for row in csv_store.read_all(paths.status)}
+        assert rows["H001"] == "RED"
+        assert rows["H002"] == "GREEN"
+        assert rows["H003"] == "GREEN"
+        assert rows["H004"] == "GREEN"
+        assert "CHARC01" in receiver.stats.last_heartbeat_at
     finally:
         config.ORGANIZATION_PATH = orig_org
         config.PRECINCTS_DIR = orig_precincts
 
-    print("mesh_data_export: OK")
+    print("heartbeat_reconcile: OK")
 
 
-def test_export_ack_retry(tmp_path) -> None:
+def test_recent_clears_store(tmp_path) -> None:
     import config
-    import address_store
-    import csv_store
-    import precinct_store
-    from mesh_data_codec import (
-        build_export_payloads,
-        build_full_export_payloads,
-        decode_mesh_data,
-        encode_export_ack,
-        encode_export_index,
-        encode_export_start,
-        encode_numbered_export_packet,
-        parse_export_ack,
-        parse_numbered_export_packet,
-    )
-    from receiver import MeshReceiver
+    import recent_clears_store
 
-    orig_org = config.ORGANIZATION_PATH
     orig_precincts = config.PRECINCTS_DIR
-    config.ORGANIZATION_PATH = tmp_path / "ack_tx" / "organization.json"
-    config.PRECINCTS_DIR = tmp_path / "ack_tx" / "precincts"
+    config.PRECINCTS_DIR = tmp_path / "precincts"
 
     try:
-        precinct_store.init_organization()
-        precinct_store.add_district("SOUTH", "South District")
-        precinct_store.add_precinct("SOUTH", "01", "South Precinct 01")
-        paths = precinct_store.paths_for_precinct("SOUTH01")
-        csv_store.init_csv(paths.status)
-        address_store.init_addresses(paths.addresses)
-        address_store.update_address("H001", "42 Pine St", path=paths.addresses)
-        csv_store.update_status("H001", "RED", path=paths.status)
-
-        assert parse_export_ack(encode_export_ack(3, 10)) == (3, 10)
-        assert parse_export_ack("hello") is None
-        start = encode_export_start(5, ack_window=3)
-        assert start.upper().endswith(":5:3")
-
-        numbered = encode_numbered_export_packet(2, 5, "ND:D:SOUTH|South District")
-        assert parse_numbered_export_packet(numbered) == (
-            2,
-            5,
-            "ND:D:SOUTH|South District",
-        )
-        decoded_numbered = decode_mesh_data(numbered)
-        assert decoded_numbered is not None
-        assert decoded_numbered.seq == 2
-        assert decoded_numbered.total == 5
-
-        scoped = build_export_payloads(precinct_ids={"SOUTH01"})
-        assert any("ND:D:SOUTH" in packet for packet in scoped)
-        assert any("ND:P:SOUTH01" in packet for packet in scoped)
-        assert all("CHARC" not in packet for packet in scoped)
-
-        payloads = build_full_export_payloads()
-        assert len(payloads) >= 4
-
-        config.ORGANIZATION_PATH = tmp_path / "ack_rx" / "organization.json"
-        config.PRECINCTS_DIR = tmp_path / "ack_rx" / "precincts"
-        precinct_store.init_organization()
-
-        client = MeshtasticClient()
-        client._enter_mock_mode("export ack test")
-        receiver = MeshReceiver(client)
-        receiver.start()
-
-        acked, errors = client.send_export_with_acks(
-            payloads,
-            delay_seconds=0.0,
-            min_delay_seconds=0.0,
-            ack_timeout_seconds=2.0,
-            max_retries=2,
-            ack_window=3,
-        )
-        receiver.stop()
-
-        assert errors == []
-        assert acked == len(payloads)
-        assert "SOUTH01" in precinct_store.precinct_ids_for_district("SOUTH")
-        recv_paths = precinct_store.paths_for_precinct("SOUTH01")
-        addresses = address_store.read_address_map(recv_paths.addresses)
-        assert addresses.get("H001") == "42 Pine St"
-        rows = csv_store.read_all(recv_paths.status)
-        assert any(r["house_id"] == "H001" and r["status_code"] == "RED" for r in rows)
-
-        # Legacy index markers still set import sequence for older transmitters.
-        receiver2 = MeshReceiver(client)
-        idx = encode_export_index(1, 3)
-        packet = decode_mesh_data(idx)
-        assert packet is not None
-        assert packet.kind.value == "index"
-        receiver2._handle_message(idx)
-        assert receiver2._import_seq == 1
+        recent_clears_store.record_clear("CHARC01", "H001")
+        assert recent_clears_store.get_recent_clears("CHARC01") == ["H001"]
+        recent_clears_store.prune_recent_clears("CHARC01", ["H001"])
+        assert recent_clears_store.get_recent_clears("CHARC01") == []
     finally:
-        config.ORGANIZATION_PATH = orig_org
         config.PRECINCTS_DIR = orig_precincts
 
-    print("export_ack_retry: OK")
+    print("recent_clears_store: OK")
+
+
 
 
 def test_ensure_precinct_from_import(tmp_path) -> None:
@@ -792,13 +674,14 @@ if __name__ == "__main__":
         test_house_management(Path(tmp))
         test_bulk_address_import(Path(tmp))
     test_printable_board_html()
+    test_field_checklist_html()
     test_text_messages()
     test_node_display_name()
     test_text_message_dispatch()
     test_global_pubsub_routing()
     with tempfile.TemporaryDirectory() as tmp:
-        test_mesh_data_export(Path(tmp))
-        test_export_ack_retry(Path(tmp))
+        test_heartbeat_reconcile(Path(tmp))
+        test_recent_clears_store(Path(tmp))
         test_ensure_precinct_from_import(Path(tmp))
     test_mock_fallback()
     print("All smoke tests passed.")
