@@ -1,4 +1,11 @@
 # Block Captain Meshtastic App — first-time setup (Windows)
+#
+# Usage (run these as TWO separate commands if scripts are blocked):
+#   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+#   .\setup.ps1
+#
+# Or run once without changing policy:
+#   powershell -ExecutionPolicy Bypass -File .\setup.ps1
 $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
@@ -102,5 +109,9 @@ Write-Host "  streamlit run app.py"
 Write-Host ""
 Write-Host "Open the URL shown (usually http://localhost:8501)"
 Write-Host ""
-Write-Host "If activation is blocked, run once in PowerShell:"
+Write-Host "If script execution is blocked, run these as TWO separate commands:"
 Write-Host "  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
+Write-Host "  .\setup.ps1"
+Write-Host ""
+Write-Host "Or run setup once without changing policy:"
+Write-Host "  powershell -ExecutionPolicy Bypass -File .\setup.ps1"
