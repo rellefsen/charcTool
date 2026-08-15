@@ -14,6 +14,13 @@ import streamlit.components.v1 as components
 from config import (
     CONNECTION_BLUETOOTH,
     CONNECTION_SERIAL,
+    MESH_MAX_PAYLOAD_BYTES,
+    SITE_ROLE_CAPTAIN,
+    SITE_ROLE_CITY,
+    SITE_ROLE_DISTRICT,
+    SITE_ROLE_LABELS,
+    SITE_ROLE_PRECINCT,
+    SITE_ROLES,
     STATUS_BG,
     STATUS_CODES,
     STATUS_COLORS,
@@ -21,7 +28,10 @@ from config import (
     STATUS_LABELS,
     STATUS_SORT_CAPTION,
     STATUS_URGENCY,
-    MESH_MAX_PAYLOAD_BYTES,
+    site_role_heartbeats,
+    site_role_receives,
+    site_role_transmits,
+    normalize_site_role,
 )
 from address_store import (
     AddressStoreError,
@@ -42,7 +52,7 @@ from house_store import (
     rename_house,
     suggest_next_house_id,
 )
-from heartbeat_service import HeartbeatService, send_district_heartbeats
+from heartbeat_service import HeartbeatService, send_precinct_heartbeat
 from meshtastic_client import (
     MeshtasticClient,
     _ensure_global_pubsub,
@@ -181,6 +191,22 @@ def _active_paths() -> PrecinctPaths:
     return paths_for_precinct(_active_precinct_id())
 
 
+def _site_role() -> str:
+    return normalize_site_role(st.session_state.app_settings.get("site_role"))
+
+
+def _role_transmits() -> bool:
+    return site_role_transmits(_site_role())
+
+
+def _role_receives() -> bool:
+    return site_role_receives(_site_role())
+
+
+def _role_heartbeats() -> bool:
+    return site_role_heartbeats(_site_role())
+
+
 def _save_context_settings(**updates: object) -> None:
     settings = {**st.session_state.app_settings, **updates}
     st.session_state.app_settings = save_settings(settings)
@@ -291,7 +317,7 @@ def _read_receiver_view_rows() -> list[dict]:
 
 def _restart_receiver_if_needed() -> None:
     receiver: MeshReceiver = st.session_state.receiver
-    if st.session_state.mode != "Receiver":
+    if not _role_receives():
         if receiver.stats.running:
             receiver.stop()
         return
@@ -300,19 +326,19 @@ def _restart_receiver_if_needed() -> None:
 
 
 def _restart_heartbeat_if_needed() -> None:
-    settings = st.session_state.app_settings
-    enabled = bool(settings.get("heartbeat_enabled", True))
-    if st.session_state.mode != "Transmitter" or not enabled:
+    if not _role_heartbeats():
         service = st.session_state.get("heartbeat_service")
         if service is not None:
             service.stop()
         return
 
-    district_id = str(settings["active_district_id"]).upper()
+    precinct_id = _active_precinct_id()
+    district_id = _active_district_id()
     service: HeartbeatService | None = st.session_state.get("heartbeat_service")
     if (
         service is None
         or service.district_id != district_id
+        or service.precinct_id != precinct_id
         or service.interval_seconds != _heartbeat_interval()
         or service.packet_delay_seconds != _sync_packet_delay()
     ):
@@ -321,6 +347,7 @@ def _restart_heartbeat_if_needed() -> None:
         service = HeartbeatService(
             st.session_state.client,
             district_id,
+            precinct_id=precinct_id,
             interval_seconds=_heartbeat_interval(),
             packet_delay_seconds=_sync_packet_delay(),
         )
@@ -493,8 +520,6 @@ def _init_session_state() -> None:
     if "receiver" not in st.session_state:
         st.session_state.receiver = MeshReceiver(st.session_state.client)
     _configure_receiver()
-    if "mode" not in st.session_state:
-        st.session_state.mode = "Transmitter"
     if "pending_edits" not in st.session_state:
         st.session_state.pending_edits = {}
     if "last_sync_log" not in st.session_state:
@@ -661,17 +686,47 @@ def _render_connection_banner() -> None:
 def _render_sidebar() -> None:
     with st.sidebar:
         st.header("Settings")
-        st.session_state.mode = st.radio(
-            "Operating mode",
-            ["Transmitter", "Receiver"],
-            index=0 if st.session_state.mode == "Transmitter" else 1,
-            help="Transmitter: edit statuses and sync to mesh. "
-            "Receiver: listen for incoming updates.",
+        current_role = _site_role()
+        selected_role = st.radio(
+            "Site role",
+            list(SITE_ROLES),
+            index=list(SITE_ROLES).index(current_role),
+            format_func=lambda role: SITE_ROLE_LABELS[role],
+            help=(
+                "Captain and precinct send house status. Only precinct sends heartbeats. "
+                "District and city listen only. Seed only the precinct files this node should own."
+            ),
         )
+        if selected_role != current_role:
+            _save_context_settings(site_role=selected_role)
+            st.session_state.pending_edits.clear()
+            st.session_state.pop("receiver_baseline", None)
+            _configure_receiver()
+            _restart_receiver_if_needed()
+            _restart_heartbeat_if_needed()
+            st.rerun()
+
+        precincts = list_precincts()
+        districts = list_districts()
+        if current_role in {SITE_ROLE_CAPTAIN, SITE_ROLE_PRECINCT} and len(precincts) > 1:
+            st.warning(
+                "This role should be seeded with **one precinct**. Extra precincts can send "
+                "or overwrite the wrong board."
+            )
+        if current_role == SITE_ROLE_DISTRICT and len(districts) > 1:
+            st.warning(
+                "District role should be seeded with **one district** and its precincts only."
+            )
+        if current_role == SITE_ROLE_CAPTAIN:
+            st.caption("Heartbeat is off. Precinct laptops own the hourly snapshot.")
+        if current_role == SITE_ROLE_PRECINCT:
+            st.caption("Listening for captain packets and heartbeating this precinct only.")
+        if current_role in {SITE_ROLE_DISTRICT, SITE_ROLE_CITY}:
+            st.caption("Send and heartbeat are disabled so this node cannot overwrite the mesh.")
 
         st.divider()
         st.subheader("Organization")
-        if st.session_state.mode == "Transmitter":
+        if _role_transmits():
             precincts = list_precincts()
             precinct_labels = {p.id: f"{p.id} — {p.name}" for p in precincts}
             current_precinct = _active_precinct_id()
@@ -816,7 +871,7 @@ def _render_sidebar() -> None:
                             new_precinct_name,
                         )
                         init_precinct_data(precinct.id)
-                        if st.session_state.mode == "Transmitter":
+                        if _role_transmits():
                             _save_context_settings(
                                 active_precinct_id=precinct.id,
                                 active_district_id=precinct.district_id,
@@ -1041,7 +1096,7 @@ def _render_sidebar() -> None:
             st.subheader("Mock testing")
             st.caption(
                 "Simulate an incoming mesh packet locally (does not transmit over the radio). "
-                "Use in **Receiver** mode to update the board."
+                "Use a listening role (precinct, district, or city) to update the board."
             )
             mock_msg = st.text_input(
                 "Simulate incoming packet",
@@ -1057,13 +1112,7 @@ def _render_sidebar() -> None:
         st.divider()
         st.subheader("Mesh sync")
         st.caption("Manual sync sends **changed houses only** since the last successful sync.")
-        if st.session_state.mode == "Transmitter":
-            heartbeat_enabled = st.checkbox(
-                "Automatic hourly heartbeat",
-                value=bool(st.session_state.app_settings.get("heartbeat_enabled", True)),
-                help="Periodically send all non-green houses plus recent clears.",
-                key="heartbeat_enabled_checkbox",
-            )
+        if _role_heartbeats():
             heartbeat_interval_minutes = st.number_input(
                 "Heartbeat interval (minutes)",
                 min_value=1,
@@ -1076,34 +1125,41 @@ def _render_sidebar() -> None:
                 key="heartbeat_interval_minutes_input",
             )
             _save_context_settings(
-                heartbeat_enabled=heartbeat_enabled,
+                heartbeat_enabled=True,
                 heartbeat_interval_seconds=float(heartbeat_interval_minutes) * 60.0,
             )
             if st.button("Send heartbeat now", use_container_width=True, key="send_heartbeat_btn"):
-                results = send_district_heartbeats(
+                success, errors = send_precinct_heartbeat(
                     st.session_state.client,
-                    _active_district_id(),
+                    _active_precinct_id(),
                     delay_seconds=_sync_packet_delay(),
                 )
-                errors = [err for _, _, errs in results for err in errs]
                 if errors:
                     st.error("Heartbeat finished with errors.")
                 else:
                     st.success(
-                        f"Heartbeat sent for {len(results)} precinct(s) in district "
-                        f"{_active_district_id()}."
+                        f"Heartbeat sent for precinct {_active_precinct_id()} "
+                        f"({success} packet(s))."
                     )
                 st.rerun()
             service: HeartbeatService | None = st.session_state.get("heartbeat_service")
-            if heartbeat_enabled and service and service.last_run_at:
+            if service and service.last_run_at:
                 last_run = datetime.fromtimestamp(service.last_run_at).strftime("%m/%d %H:%M")
                 st.caption(f"Last automatic heartbeat: **{last_run}**")
-            elif heartbeat_enabled:
-                st.caption("Automatic heartbeat runs on the configured interval.")
+            else:
+                st.caption(
+                    "Automatic heartbeat is on for precinct role "
+                    "(this precinct only, not the whole district)."
+                )
+        elif _role_transmits():
+            st.caption("Captain role does not send heartbeats.")
 
         st.caption(
             "Organization, addresses, and initial house lists are seeded locally on each node."
         )
+
+        if not _role_transmits():
+            return
 
         st.divider()
         st.subheader("House management")
@@ -1397,11 +1453,25 @@ def _render_transmitter_mode() -> None:
     precinct = get_precinct(_active_precinct_id())
     precinct_label = f"{precinct.id} — {precinct.name}" if precinct else _active_precinct_id()
 
-    st.title("📤 Transmitter Mode")
-    st.caption(f"Precinct: **{precinct_label}**")
-    st.caption("Update house statuses and sync to the mesh network.")
+    role = _site_role()
+    if role == SITE_ROLE_CAPTAIN:
+        st.title("📤 Captain")
+        st.caption(f"Precinct: **{precinct_label}**")
+        st.caption("Mark houses and sync. Heartbeat stays off so the precinct laptop owns the snapshot.")
+    else:
+        st.title("📤 Precinct")
+        st.caption(f"Precinct: **{precinct_label}**")
+        st.caption("Listening for captains, sending local changes, and heartbeating this precinct.")
     st.caption(STATUS_SORT_CAPTION)
     st.caption("Only **changed** houses are sent when you click sync.")
+
+    if _role_receives():
+        _restart_receiver_if_needed()
+        receiver: MeshReceiver = st.session_state.receiver
+        if receiver.stats.running:
+            st.caption(
+                f"Listener **active** — {receiver.stats.updates_applied} mesh update(s) applied."
+            )
 
     rows = sort_rows_by_urgency(read_all(path=paths.status))
     _render_print_board_actions(
@@ -1647,9 +1717,10 @@ def _render_receiver_mode() -> None:
         view_label = f"{district_id} — {districts.get(district_id, district_id)}"
         board_title = f"District board ({view_label})"
 
-    st.title("📥 Receiver Mode")
+    role_title = "🏙️ City EOC" if _site_role() == SITE_ROLE_CITY else "📥 District"
+    st.title(role_title)
     st.caption(f"Viewing: **{view_label}**")
-    st.caption("Listening for mesh updates on all precincts and refreshing the board.")
+    st.caption("Listen-only. Send and heartbeat are off so this node cannot overwrite field status.")
 
     _restart_receiver_if_needed()
     rows = _read_receiver_view_rows()
@@ -1749,25 +1820,27 @@ def main() -> None:
     _init_session_state()
     _ensure_text_message_listener()
     _render_connection_banner()
-    if st.session_state.mode == "Transmitter":
+    if _role_transmits():
         _render_text_message_alert_section_live()
     else:
         _render_text_message_alert_section()
     _render_sidebar()
 
-    if st.session_state.mode == "Transmitter":
-        if st.session_state.receiver.stats.running:
-            st.session_state.receiver.stop()
-        _restart_heartbeat_if_needed()
-        st.session_state._last_mode = "Transmitter"
+    role = _site_role()
+    if role != st.session_state.get("_last_site_role"):
+        st.session_state.pop("receiver_baseline", None)
+    st.session_state._last_site_role = role
+
+    _restart_receiver_if_needed()
+    _restart_heartbeat_if_needed()
+
+    if _role_transmits():
         _render_transmitter_mode()
+        if _role_receives():
+            st.caption("Auto-refreshing so captain packets show up…")
+            time.sleep(2)
+            st.rerun()
     else:
-        service = st.session_state.get("heartbeat_service")
-        if service is not None:
-            service.stop()
-        if st.session_state.get("_last_mode") != "Receiver":
-            st.session_state.pop("receiver_baseline", None)
-        st.session_state._last_mode = "Receiver"
         _render_receiver_mode()
 
 

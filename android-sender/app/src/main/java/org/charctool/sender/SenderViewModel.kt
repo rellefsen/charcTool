@@ -22,11 +22,18 @@ import org.charctool.sender.protocol.PacketCodec
 import org.charctool.sender.protocol.Precinct
 import org.charctool.sender.protocol.SeedParser
 
+const val ROLE_CAPTAIN = "captain"
+const val ROLE_PRECINCT = "precinct"
+
+private const val PREFS_NAME = "block_status"
+private const val PREF_SITE_ROLE = "site_role"
+
 data class SenderUiState(
     val hasSeed: Boolean = false,
     val organization: Organization? = null,
     val precinctId: String = "",
     val houses: List<HouseRow> = emptyList(),
+    val siteRole: String = ROLE_CAPTAIN,
     val mockRadio: Boolean = true,
     val radioConnected: Boolean = false,
     val radioLabel: String = "Mock (no radio)",
@@ -43,6 +50,7 @@ data class SenderUiState(
 
 class SenderViewModel(app: Application) : AndroidViewModel(app) {
     private val store = SeedStore(app.filesDir)
+    private val prefs = app.getSharedPreferences(PREFS_NAME, Application.MODE_PRIVATE)
     private var housesByPrecinct: Map<String, List<HouseRow>> = emptyMap()
     private var transport: MeshTransport = MockMeshTransport()
     private var scanJob: Job? = null
@@ -50,6 +58,7 @@ class SenderViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(
         SenderUiState(
             hasSeed = store.hasSeed(),
+            siteRole = prefs.getString(PREF_SITE_ROLE, ROLE_CAPTAIN) ?: ROLE_CAPTAIN,
             channels = MockMeshTransport().channels(),
         ),
     )
@@ -83,6 +92,17 @@ class SenderViewModel(app: Application) : AndroidViewModel(app) {
     fun selectPrecinct(id: String) {
         val houses = housesByPrecinct[id.uppercase()].orEmpty()
         _ui.update { it.copy(precinctId = id.uppercase(), houses = houses) }
+    }
+
+    fun setSiteRole(role: String) {
+        val normalized = if (role == ROLE_PRECINCT) ROLE_PRECINCT else ROLE_CAPTAIN
+        prefs.edit().putString(PREF_SITE_ROLE, normalized).apply()
+        val message = if (normalized == ROLE_PRECINCT) {
+            "Precinct role: Send and Heartbeat. One phone per precinct."
+        } else {
+            "Captain role: Send only. Precinct laptops own the heartbeat."
+        }
+        _ui.update { it.copy(siteRole = normalized, statusMessage = message) }
     }
 
     fun setStatus(houseId: String, status: String) {
@@ -239,6 +259,12 @@ class SenderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun sendHeartbeat() {
+        if (_ui.value.siteRole != ROLE_PRECINCT) {
+            _ui.update {
+                it.copy(statusMessage = "Heartbeat is precinct-only. Switch role in Setup.")
+            }
+            return
+        }
         sendPackets { precinct, houses ->
             val nonGreen = PacketCodec.nonGreenRows(houses.pairs())
             val clears = store.takeClears(precinct)

@@ -109,5 +109,44 @@ SYNC_PACKET_DELAY = 2.0
 # Hourly heartbeat of all non-green houses (seconds)
 HEARTBEAT_INTERVAL_SECONDS = 3600.0
 
+# Site roles — one writer/heartbeat owner per precinct
+SITE_ROLE_CAPTAIN = "captain"
+SITE_ROLE_PRECINCT = "precinct"
+SITE_ROLE_DISTRICT = "district"
+SITE_ROLE_CITY = "city"
+SITE_ROLES = (
+    SITE_ROLE_CAPTAIN,
+    SITE_ROLE_PRECINCT,
+    SITE_ROLE_DISTRICT,
+    SITE_ROLE_CITY,
+)
+SITE_ROLE_LABELS = {
+    SITE_ROLE_CAPTAIN: "Captain — mark houses and send (no heartbeat)",
+    SITE_ROLE_PRECINCT: "Precinct — send, listen to captains, heartbeat",
+    SITE_ROLE_DISTRICT: "District — listen only (no send, no heartbeat)",
+    SITE_ROLE_CITY: "City EOC — listen only (no send, no heartbeat)",
+}
+
+
+def normalize_site_role(role: str | None) -> str:
+    value = str(role or "").strip().lower()
+    return value if value in SITE_ROLES else SITE_ROLE_PRECINCT
+
+
+def site_role_transmits(role: str) -> bool:
+    return normalize_site_role(role) in {SITE_ROLE_CAPTAIN, SITE_ROLE_PRECINCT}
+
+
+def site_role_receives(role: str) -> bool:
+    return normalize_site_role(role) in {
+        SITE_ROLE_PRECINCT,
+        SITE_ROLE_DISTRICT,
+        SITE_ROLE_CITY,
+    }
+
+
+def site_role_heartbeats(role: str) -> bool:
+    return normalize_site_role(role) == SITE_ROLE_PRECINCT
+
 # Include explicit GREEN clears for this long after a house is cleared (seconds)
 RECENT_CLEARS_WINDOW_SECONDS = 10800.0

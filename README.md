@@ -8,15 +8,17 @@ The laptop app talks to a Meshtastic radio over **USB serial** or **Bluetooth**.
 
 ## What it does
 
-- **Transmitter** — edit a precinct board, sync status changes to the mesh, send hourly heartbeats of all non-green houses.
-- **Receiver** — listen for `NS:` packets and apply them to local CSVs; on heartbeat end, clear RED/YELLOW houses that were not in the snapshot (missed GREEN). BLACK is never auto-cleared.
+- **Captain** — mark houses and send deltas. No heartbeat. Laptop or Android.
+- **Precinct** — listen for captains, send local changes, hourly heartbeat for **that precinct only**.
+- **District** — listen only (no send, no heartbeat). Seed that district’s precincts.
+- **City EOC** — listen only. Seed every precinct. Heartbeat end will not GREEN a house whose local timestamp is newer than that snapshot (or the previous heartbeat), so a captain packet that reached the city but not the precinct is kept.
 - **Organization** — districts and precincts, each with `house_addresses.csv` and `neighborhood_status.csv`.
-- **Manual seeding** — copy org and precinct files to every laptop. There is no over-air full data export.
+- **Manual seeding** — copy **trimmed** org and precinct files to each node. There is no over-air full data export.
 - **Text messages** — optional free-form chat on the same mesh channel.
 
 Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick, a shared zip, or the sample [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) in this repo.
 
-A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Sideload the **mesh** APK from [Releases](https://github.com/rellefsen/charcTool/releases/latest); **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
+A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md) for **captains and precincts** only (send; precinct role may heartbeat). District and city use the laptop app. Sideload the **mesh** APK from [Releases](https://github.com/rellefsen/charcTool/releases/latest) (0.1.1 or newer). Do not run two transmitters (phone + laptop, or two heartbeats) on the same precinct.
 
 ## Prerequisites
 
@@ -150,9 +152,18 @@ meshtastic --ble-scan
 meshtastic --ble --info        # Bluetooth
 ```
 
-## Seed house data on every laptop
+## Seed house data on every node
 
-Every node needs the same organization and addresses. Status files start **all GREEN**.
+Do **not** copy the full city org to every laptop. Seed only what that role should own:
+
+| Role | `organization.json` | Precinct folders |
+|------|---------------------|------------------|
+| Captain | One precinct | That precinct only |
+| Precinct | One precinct | That precinct only |
+| District | That district’s precincts | Those precincts only |
+| City EOC | Entire city | Every precinct |
+
+Status files start **all GREEN**. Copy by USB stick or zip. The sample [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) is a full-city seed — trim it before loading on a captain or precinct node.
 
 Copy these three kinds of files:
 
@@ -164,7 +175,7 @@ Copy these three kinds of files:
 
 Do **not** put live operational CSVs in Git; `data/organization.json` and `data/precincts/` are gitignored. Seed each node from a USB stick or zip.
 
-The repo includes a starter zip, [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) (`organization.json` plus CHARC01/02 and SOUTH01/02/03). Unzip it into `data/` on each laptop, or **Import seed** in the Android app.
+The repo includes a starter zip, [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) (`organization.json` plus CHARC01/02 and SOUTH01/02/03). That is a **city** seed. Trim it for captain, precinct, and district nodes. Android **Import seed** uses the same zip shape.
 
 `data/app_settings.json` is per laptop (channel, serial vs Bluetooth, heartbeat interval). It is also gitignored.
 
@@ -210,20 +221,22 @@ H003,GREEN,2026-08-14T05:21:42Z
 
 ## Day-of operations
 
-| Site | Radio | Laptop mode |
-|------|--------|-------------|
-| District | CLIENT (USB or BLE) | **Transmitter** — laptop Streamlit, or the Android sender APK |
+| Site | Radio | App role |
+|------|--------|----------|
+| Block captain | CLIENT (USB, BLE, or Android) | **Captain** — send status, no heartbeat |
+| Precinct | CLIENT | **Precinct** — listen + send + heartbeat (one owner per precinct) |
+| District | CLIENT | **District** — laptop receive only |
 | Coverage / roofs | ROUTER | No laptop |
-| EOC | CLIENT | **Receiver** — laptop only; apply incoming status |
+| City EOC | CLIENT | **City** — laptop receive only |
 
-Sidebar → **Radio** → **Open field checklist** for the printable standup guide (channel, delays, smoke test, failure symptoms).
+Sidebar → **Site role** must match the seed. Sidebar → **Radio** → **Open field checklist** for standup (channel, delays, smoke test).
 
-Smoke test one district → EOC:
+Smoke test captain or precinct → city:
 
 1. Both connected (not mock), channel index shown.
-2. Send a short free-form text; EOC sees it.
-3. Mark one house YELLOW, **SYNC TO MESH**; EOC updates.
-4. Clear to GREEN (or **Send heartbeat now** if the clear was missed).
+2. Send a short free-form text; city sees it.
+3. Mark one house YELLOW, **SYNC TO MESH**; city updates.
+4. Clear to GREEN (or **Send heartbeat now** from the **precinct** if the clear was missed).
 
 Defaults: 233-byte text payloads, ~2 s pause between packets (raise to 4–6 s if packets drop), heartbeat every 60 minutes.
 

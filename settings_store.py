@@ -16,7 +16,9 @@ from config import (
     MESHTASTIC_CHANNEL_NAME,
     MESHTASTIC_CONNECTION_TYPE,
     MESHTASTIC_PORT,
+    SITE_ROLE_PRECINCT,
     SYNC_PACKET_DELAY,
+    normalize_site_role,
 )
 import config
 
@@ -30,6 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "sync_packet_delay": SYNC_PACKET_DELAY,
     "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
     "heartbeat_enabled": True,
+    "site_role": SITE_ROLE_PRECINCT,
     "active_precinct_id": DEFAULT_PRECINCT_ID,
     "active_district_id": DEFAULT_DISTRICT_ID,
     "show_mock_testing": True,
@@ -85,6 +88,7 @@ def _coerce_settings(raw: dict[str, Any]) -> dict[str, Any]:
     settings["heartbeat_enabled"] = bool(
         raw.get("heartbeat_enabled", settings["heartbeat_enabled"])
     )
+    settings["site_role"] = normalize_site_role(raw.get("site_role", settings["site_role"]))
 
     precinct = str(raw.get("active_precinct_id", settings["active_precinct_id"])).strip().upper()
     district = str(raw.get("active_district_id", settings["active_district_id"])).strip().upper()

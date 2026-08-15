@@ -1,12 +1,15 @@
 """Quick smoke tests for packet codec and offline fallback."""
 
 from packet_codec import (
+    ControlPacketKind,
     MeshUpdate,
     decode_packet,
     decode_updates,
     encode_bulk_sync,
     encode_bulk_sync_chunks,
+    encode_heartbeat_start,
     encode_status,
+    parse_control_packet,
 )
 from address_store import attach_addresses, default_address, update_address
 from csv_store import sort_rows_by_urgency
@@ -124,6 +127,17 @@ def test_packet_codec() -> None:
     )
     assert decode_packet("hello mesh") is None
 
+    start = encode_heartbeat_start("SOUTH01", "2026-08-15T21:05:00Z")
+    assert start == "NS:SOUTH01:HB:S:2026-08-15T21:05:00Z"
+    control = parse_control_packet(start)
+    assert control is not None
+    assert control.kind == ControlPacketKind.HEARTBEAT_START
+    assert control.snapshot_at == "2026-08-15T21:05:00Z"
+    legacy = parse_control_packet("NS:SOUTH01:HB:S")
+    assert legacy is not None
+    assert legacy.kind == ControlPacketKind.HEARTBEAT_START
+    assert legacy.snapshot_at is None
+
     bulk = encode_bulk_sync(
         "CHARC01",
         [("H001", "YELLOW"), ("H002", "RED"), ("H003", "GREEN")],
@@ -171,6 +185,7 @@ def test_settings_store(tmp_path) -> None:
         assert defaults["active_precinct_id"] == "CHARC01"
         assert defaults["active_district_id"] == "CHARC"
         assert defaults["show_mock_testing"] is True
+        assert defaults["site_role"] == "precinct"
         assert defaults["connection_type"] == "serial"
         assert defaults["ble_address"] is None
 
@@ -184,21 +199,51 @@ def test_settings_store(tmp_path) -> None:
                 "active_precinct_id": "CHARC02",
                 "active_district_id": "CHARC",
                 "show_mock_testing": False,
+                "site_role": "city",
             }
         )
         assert saved["active_precinct_id"] == "CHARC02"
         assert saved["show_mock_testing"] is False
+        assert saved["site_role"] == "city"
         assert saved["connection_type"] == "bluetooth"
         assert saved["ble_address"] == "AA:BB:CC:DD:EE:FF"
         reloaded = settings_store.load_settings()
         assert reloaded == saved
 
+        invalid_role = settings_store.save_settings({"site_role": "eoc"})
+        assert invalid_role["site_role"] == "precinct"
         invalid = settings_store.save_settings({"connection_type": "wifi"})
         assert invalid["connection_type"] == "serial"
     finally:
         config.SETTINGS_PATH = orig
 
     print("settings_store: OK")
+
+
+def test_site_roles() -> None:
+    from config import (
+        SITE_ROLE_CAPTAIN,
+        SITE_ROLE_CITY,
+        SITE_ROLE_DISTRICT,
+        SITE_ROLE_PRECINCT,
+        normalize_site_role,
+        site_role_heartbeats,
+        site_role_receives,
+        site_role_transmits,
+    )
+
+    assert normalize_site_role("CITY") == SITE_ROLE_CITY
+    assert normalize_site_role("nope") == SITE_ROLE_PRECINCT
+    assert site_role_transmits(SITE_ROLE_CAPTAIN) is True
+    assert site_role_heartbeats(SITE_ROLE_CAPTAIN) is False
+    assert site_role_receives(SITE_ROLE_CAPTAIN) is False
+    assert site_role_transmits(SITE_ROLE_PRECINCT) is True
+    assert site_role_receives(SITE_ROLE_PRECINCT) is True
+    assert site_role_heartbeats(SITE_ROLE_PRECINCT) is True
+    assert site_role_transmits(SITE_ROLE_DISTRICT) is False
+    assert site_role_receives(SITE_ROLE_DISTRICT) is True
+    assert site_role_heartbeats(SITE_ROLE_CITY) is False
+    print("site_roles: OK")
 
 
 def test_precinct_store(tmp_path) -> None:
@@ -416,6 +461,7 @@ def test_field_checklist_html() -> None:
     assert "mock mode" in html
     assert "NS:SOUTH01:HB:E" in html
     assert "BLACK is never auto-cleared" in html
+    assert "Site role" in html
     assert "Do not go live" in html
     assert "Bluetooth" in html
     print("field_checklist: OK")
@@ -616,7 +662,7 @@ def test_heartbeat_reconcile(tmp_path) -> None:
             [("H001", "RED"), ("H006", "BLACK")],
             [("H004", "GREEN")],
         )
-        assert packets[0] == encode_heartbeat_start("CHARC01")
+        assert packets[0].startswith("NS:CHARC01:HB:S:")
         assert packets[-1] == encode_heartbeat_end("CHARC01")
 
         client = MeshtasticClient()
@@ -637,6 +683,54 @@ def test_heartbeat_reconcile(tmp_path) -> None:
         config.PRECINCTS_DIR = orig_precincts
 
     print("heartbeat_reconcile: OK")
+
+
+def test_heartbeat_keeps_newer_local_status(tmp_path) -> None:
+    import csv
+    from csv_store import reconcile_non_green_snapshot
+
+    path = tmp_path / "neighborhood_status.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["house_id", "status_code", "timestamp"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "house_id": "H001",
+                "status_code": "RED",
+                "timestamp": "2026-08-15T12:00:00Z",
+            }
+        )
+        writer.writerow(
+            {
+                "house_id": "H002",
+                "status_code": "YELLOW",
+                "timestamp": "2026-08-15T14:00:00Z",
+            }
+        )
+        writer.writerow(
+            {
+                "house_id": "H003",
+                "status_code": "RED",
+                "timestamp": "2026-08-15T15:30:00Z",
+            }
+        )
+
+    cleared = reconcile_non_green_snapshot(
+        set(),
+        path=path,
+        snapshot_at="2026-08-15T15:00:00Z",
+        previous_heartbeat_at="2026-08-15T13:00:00Z",
+    )
+    assert "H001" in cleared
+    assert "H002" not in cleared
+    assert "H003" not in cleared
+
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = {row["house_id"]: row["status_code"] for row in csv.DictReader(fh)}
+    assert rows["H001"] == "GREEN"
+    assert rows["H002"] == "YELLOW"
+    assert rows["H003"] == "RED"
+    print("heartbeat_keeps_newer_local_status: OK")
 
 
 def test_recent_clears_store(tmp_path) -> None:
@@ -710,6 +804,7 @@ if __name__ == "__main__":
     test_urgency_sort()
     with tempfile.TemporaryDirectory() as tmp:
         test_settings_store(Path(tmp))
+        test_site_roles()
         test_precinct_store(Path(tmp))
         test_house_management(Path(tmp))
         test_bulk_address_import(Path(tmp))
@@ -727,6 +822,7 @@ if __name__ == "__main__":
         print("global_pubsub_routing: skipped (pypubsub not installed)")
     with tempfile.TemporaryDirectory() as tmp:
         test_heartbeat_reconcile(Path(tmp))
+        test_heartbeat_keeps_newer_local_status(Path(tmp))
         test_recent_clears_store(Path(tmp))
         test_ensure_precinct_from_import(Path(tmp))
     test_mock_fallback()

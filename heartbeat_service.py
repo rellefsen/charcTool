@@ -64,11 +64,13 @@ class HeartbeatService:
         client: MeshtasticClient,
         district_id: str,
         *,
+        precinct_id: str | None = None,
         interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
         packet_delay_seconds: float = SYNC_PACKET_DELAY,
     ) -> None:
         self.client = client
         self.district_id = district_id.strip().upper()
+        self.precinct_id = precinct_id.strip().upper() if precinct_id else None
         self.interval_seconds = interval_seconds
         self.packet_delay_seconds = packet_delay_seconds
         self._thread: threading.Thread | None = None
@@ -86,7 +88,10 @@ class HeartbeatService:
             daemon=True,
         )
         self._thread.start()
-        logger.info("Heartbeat service started for district %s", self.district_id)
+        logger.info(
+            "Heartbeat service started for %s",
+            self.precinct_id or f"district {self.district_id}",
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -99,11 +104,18 @@ class HeartbeatService:
         time.sleep(random.uniform(0.0, min(60.0, self.interval_seconds * 0.05)))
         while not self._stop_event.is_set():
             try:
-                send_district_heartbeats(
-                    self.client,
-                    self.district_id,
-                    delay_seconds=self.packet_delay_seconds,
-                )
+                if self.precinct_id:
+                    send_precinct_heartbeat(
+                        self.client,
+                        self.precinct_id,
+                        delay_seconds=self.packet_delay_seconds,
+                    )
+                else:
+                    send_district_heartbeats(
+                        self.client,
+                        self.district_id,
+                        delay_seconds=self.packet_delay_seconds,
+                    )
                 self.last_run_at = time.time()
                 self.last_error = ""
             except Exception as exc:

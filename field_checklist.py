@@ -111,9 +111,11 @@ def build_field_checklist_html(
   <table>
     <thead><tr><th>Site</th><th>Radio role</th><th>Laptop role</th><th>Must match</th></tr></thead>
     <tbody>
-      <tr><td>Each district</td><td>CLIENT USB radio</td><td>Transmitter — status + heartbeat</td><td>{channel} + same seed CSVs</td></tr>
+      <tr><td>Block captain</td><td>CLIENT (laptop USB/BLE or Android)</td><td>Captain — send status, no heartbeat</td><td>{channel} + one precinct seed</td></tr>
+      <tr><td>Precinct</td><td>CLIENT</td><td>Precinct — listen, send, heartbeat that precinct</td><td>{channel} + one precinct seed</td></tr>
+      <tr><td>District</td><td>CLIENT USB radio</td><td>District — listen only</td><td>{channel} + that district’s precinct files</td></tr>
       <tr><td>Coverage (roofs)</td><td>ROUTER / ROUTER_LATE</td><td>No laptop required</td><td>Same modem + hop limit</td></tr>
-      <tr><td>EOC</td><td>CLIENT USB radio</td><td>Receiver — apply NS: packets</td><td>{channel} + same seed CSVs</td></tr>
+      <tr><td>City EOC</td><td>CLIENT USB radio</td><td>City — listen only</td><td>{channel} + full city seed</td></tr>
     </tbody>
   </table>
 
@@ -135,33 +137,33 @@ def build_field_checklist_html(
 
   <h2>1. Radios</h2>
   <ol>
-    <li>Flash current Meshtastic firmware on every radio (district + EOC).</li>
+    <li>Flash current Meshtastic firmware on every radio (captain / precinct / district / city).</li>
     <li>Set unique long names: EOC-OPS, SOUTH-TX, NORTH-TX, etc.</li>
     <li>Create a secondary channel named <code>{channel}</code> on every radio. Same PSK.</li>
     <li>Leave Primary as admin/chat if you want; Block Status only uses <code>{channel}</code>.</li>
     <li>Set hop limit high enough for district → city routers → EOC (start at 5).</li>
     <li>Match modem preset on all nodes (LongFast is the usual default).</li>
-    <li>District + EOC laptops: CLIENT. Roof/coverage nodes: ROUTER or ROUTER_LATE.</li>
+    <li>District + precinct + city laptops: CLIENT. Roof/coverage nodes: ROUTER or ROUTER_LATE.</li>
     <li>Confirm the radio link: USB <code>meshtastic --info</code>, or Bluetooth <code>meshtastic --ble-scan</code> then <code>meshtastic --ble --info</code>.</li>
   </ol>
 
   <h2>2. Seed every laptop</h2>
   <p>No over-air org/address export. Copy files by USB stick before the event.</p>
   <ol>
-    <li>Copy the same <code>data/organization.json</code> to every laptop.</li>
-    <li>Copy each precinct folder: <code>house_addresses.csv</code> + <code>neighborhood_status.csv</code> (all GREEN).</li>
-    <li>District nodes: Transmitter view, heartbeat on, interval {heartbeat_minutes} minutes.</li>
-    <li>EOC laptop: Receiver view, watching the districts you expect to hear.</li>
+    <li>Copy a <strong>trimmed</strong> <code>data/organization.json</code> — one precinct for captain/precinct, one district for district laptops, full city at EOC.</li>
+    <li>Copy only those precinct folders: <code>house_addresses.csv</code> + <code>neighborhood_status.csv</code> (all GREEN).</li>
+    <li>Set <strong>Site role</strong> to match the seed. Precinct: heartbeat on (that precinct only). Captain / district / city: no heartbeat.</li>
+    <li>Do not run two heartbeats or a captain phone plus a precinct transmitter editing the same houses at once.</li>
   </ol>
 
-  <h2>3. Live smoke test (one district → EOC)</h2>
+  <h2>3. Live smoke test (captain or precinct → city)</h2>
   <ol>
     <li>Connect radio. Status must say connected, not mock mode.</li>
     <li>Confirm channel index is shown for <code>{channel}</code> (not missing).</li>
-    <li>Send a short free-form text; EOC should see it in recent activity.</li>
-    <li>Mark one house YELLOW, SYNC TO MESH; EOC board updates.</li>
-    <li>Clear that house to GREEN; EOC should follow (or catch it on heartbeat).</li>
-    <li>Send heartbeat now from the district; EOC shows last heartbeat for that precinct.</li>
+    <li>Send a short free-form text; city should see it in recent activity.</li>
+    <li>Mark one house YELLOW, SYNC TO MESH; city board updates.</li>
+    <li>Clear that house to GREEN; city should follow (or catch it on precinct heartbeat).</li>
+    <li>Send heartbeat now from the <strong>precinct</strong> role; city shows last heartbeat for that precinct.</li>
   </ol>
 
   <h2>What flies over the air</h2>
@@ -169,7 +171,7 @@ def build_field_checklist_html(
     <thead><tr><th>When</th><th>What</th><th>Example</th></tr></thead>
     <tbody>
       <tr><td>Operator commit</td><td>SYNC TO MESH sends only changed houses as <code>NS:</code> packets.</td><td><code>NS:SOUTH01:H014:Y</code></td></tr>
-      <tr><td>Hourly heartbeat</td><td>HB:S, all non-green houses (including BLACK), optional recent GREEN clears, then HB:E. EOC sets missing RED/YELLOW houses back to GREEN. BLACK is never auto-cleared.</td><td><code>NS:SOUTH01:HB:S</code> … <code>NS:SOUTH01:B:H001R,H014Y,H020K</code> … <code>NS:SOUTH01:HB:E</code></td></tr>
+      <tr><td>Hourly heartbeat</td><td>Precinct role only. HB:S (with snapshot time), all non-green houses (including BLACK), optional recent GREEN clears, then HB:E. City sets missing RED/YELLOW houses back to GREEN unless the local timestamp is newer than this snapshot or the previous heartbeat (captain packet that skipped the precinct). BLACK is never auto-cleared.</td><td><code>NS:SOUTH01:HB:S:2026-08-15T21:05:00Z</code> … <code>NS:SOUTH01:B:H001R,H014Y,H020K</code> … <code>NS:SOUTH01:HB:E</code></td></tr>
     </tbody>
   </table>
 

@@ -9,6 +9,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from csv_store import apply_remote_update, ensure_status_csv, reconcile_non_green_snapshot
 from config import RECEIVER_POLL_INTERVAL
 from meshtastic_client import MeshtasticClient
@@ -22,6 +24,26 @@ from precinct_store import paths_for_precinct
 logger = logging.getLogger(__name__)
 
 RECENT_ACTIVITY_LIMIT = 15
+_LAST_HEARTBEAT_FILE = "last_heartbeat_at.txt"
+
+
+def _last_heartbeat_path(precinct_id: str) -> Path:
+    return paths_for_precinct(precinct_id).status.parent / _LAST_HEARTBEAT_FILE
+
+
+def _read_saved_heartbeat_at(precinct_id: str) -> str | None:
+    path = _last_heartbeat_path(precinct_id)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _write_saved_heartbeat_at(precinct_id: str, at: str) -> None:
+    path = _last_heartbeat_path(precinct_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(at, encoding="utf-8")
 
 
 @dataclass
@@ -35,6 +57,7 @@ class RecentActivity:
 class HeartbeatSession:
     precinct_id: str
     snapshot_house_ids: set[str] = field(default_factory=set)
+    snapshot_at: str = ""
 
 
 @dataclass
@@ -105,13 +128,21 @@ class MeshReceiver:
     def _should_apply_status(self, precinct_id: str) -> bool:
         return precinct_id in self.watched_precinct_ids or not self.watched_precinct_ids
 
+    def _is_own_packet(self, from_id: str | None) -> bool:
+        if not from_id:
+            return False
+        local = self.client.local_node_id()
+        return bool(local) and from_id.upper() == local.upper()
+
     def _handle_message(self, text: str, from_id: str | None = None) -> None:
-        del from_id
         self.stats.packets_received += 1
         self.stats.last_packet = text
 
         control = parse_control_packet(text)
         if control is not None:
+            if self._is_own_packet(from_id):
+                logger.debug("Ignoring own heartbeat/control packet")
+                return
             self._handle_control_packet(control, text)
             return
 
@@ -169,7 +200,13 @@ class MeshReceiver:
             return
 
         if control.kind == ControlPacketKind.HEARTBEAT_START:
-            self._heartbeat = HeartbeatSession(precinct_id=precinct_id)
+            snapshot_at = control.snapshot_at or datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            self._heartbeat = HeartbeatSession(
+                precinct_id=precinct_id,
+                snapshot_at=snapshot_at,
+            )
             self._track_precinct(precinct_id)
             self._record_activity(raw_text, f"{precinct_id} heartbeat started")
             return
@@ -212,10 +249,15 @@ class MeshReceiver:
 
             paths = paths_for_precinct(precinct_id)
             ensure_status_csv(paths.status)
+            previous = self.stats.last_heartbeat_at.get(precinct_id) or _read_saved_heartbeat_at(
+                precinct_id
+            )
             try:
                 cleared = reconcile_non_green_snapshot(
                     self._heartbeat.snapshot_house_ids,
                     path=paths.status,
+                    snapshot_at=self._heartbeat.snapshot_at,
+                    previous_heartbeat_at=previous,
                 )
             except Exception as exc:
                 self.stats.last_error = str(exc)
@@ -226,6 +268,7 @@ class MeshReceiver:
 
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self.stats.last_heartbeat_at[precinct_id] = now
+            _write_saved_heartbeat_at(precinct_id, now)
             summary_parts = [f"{precinct_id} heartbeat complete"]
             if cleared:
                 summary_parts.append(

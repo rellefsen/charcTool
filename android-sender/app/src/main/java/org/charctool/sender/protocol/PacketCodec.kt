@@ -19,8 +19,10 @@ object PacketCodec {
         return "$PREFIX:$p:$h:$letter"
     }
 
-    fun encodeHeartbeatStart(precinctId: String): String =
-        "$PREFIX:${precinctId.trim().uppercase()}:HB:S"
+    fun encodeHeartbeatStart(precinctId: String): String {
+        val stamp = java.time.Instant.now().toString().replace("+00:00", "Z")
+        return "$PREFIX:${precinctId.trim().uppercase()}:HB:S:$stamp"
+    }
 
     fun encodeHeartbeatEnd(precinctId: String): String =
         "$PREFIX:${precinctId.trim().uppercase()}:HB:E"
