@@ -16,7 +16,7 @@ The laptop app talks to a Meshtastic radio over **USB serial** or **Bluetooth**.
 
 Operational house data under `data/` is gitignored. It does not go to GitHub. Seed each node from a USB stick, a shared zip, or the sample [`charcTool-housing-data-sample.zip`](charcTool-housing-data-sample.zip) in this repo.
 
-A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Use the **mesh** APK on the field phone; **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
+A simplified **Android sender** lives in [`android-sender/`](android-sender/README.md). District phones import a seed zip, pick a Meshtastic radio over BLE, choose the `charcStatus` channel by name, and **Send** / **Heartbeat** the same `NS:` packets as the laptop. It does not receive or edit org files. Sideload the **mesh** APK from [Releases](https://github.com/rellefsen/charcTool/releases/latest); **mock** is UI-only. Do not transmit the same precinct from phone and laptop at once.
 
 ## Prerequisites
 

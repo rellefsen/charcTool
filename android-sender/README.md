@@ -6,6 +6,10 @@ It does **not** receive, reconcile heartbeats, or edit districts/precincts. EOC 
 
 The home-screen name is **Block Status**. The mesh channel is still **`charcStatus`**. Do not run this app and a laptop transmitter on the same precinct at the same time.
 
+## Download
+
+Sideload the field **mesh** APK from **[GitHub Releases](https://github.com/rellefsen/charcTool/releases/latest)** (`BlockStatus-mesh-debug-*.apk`). Allow unknown sources. This is a debug build for field trials, not a Play Store app.
+
 ## What it sends
 
 Same wire format as `packet_codec.py`:
