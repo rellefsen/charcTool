@@ -18,7 +18,7 @@ class PacketCodecTest {
             listOf("H001" to "RED", "H014" to "YELLOW", "H020" to "BLACK"),
             listOf("H003"),
         )
-        assertEquals("NS:CHARC01:HB:S", packets.first())
+        assertTrue(packets.first().startsWith("NS:CHARC01:HB:S:"))
         assertEquals("NS:CHARC01:HB:E", packets.last())
         assertTrue(packets.any { it.startsWith("NS:CHARC01:B:") && it.contains("H020K") })
         assertTrue(packets.any { it.startsWith("NS:CHARC01:C:") && it.contains("H003G") })

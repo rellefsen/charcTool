@@ -20,6 +20,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def ensure_status_csv(path: Path | None = None) -> Path:
     """Create an empty status CSV (header only) if it does not exist."""
     target = path or CSV_PATH
@@ -218,17 +230,25 @@ def apply_remote_update(
 def reconcile_non_green_snapshot(
     snapshot_house_ids: set[str],
     path: Path | None = None,
+    *,
+    snapshot_at: str | None = None,
+    previous_heartbeat_at: str | None = None,
 ) -> list[str]:
     """
     After a heartbeat snapshot, set local RED/YELLOW houses not in the snapshot to GREEN.
 
     BLACK is never auto-cleared: a missing death is a lost packet, not a GREEN.
+    Houses whose local timestamp is newer than this snapshot (or newer than the
+    previous completed heartbeat) are kept — a captain packet that reached EOC
+    but not the precinct must not be wiped.
     Returns house IDs that were cleared.
     """
     target = path or CSV_PATH
     ensure_status_csv(target)
     snapshot = {house_id.strip().upper() for house_id in snapshot_house_ids}
     clearable = {STATUS_RED, STATUS_YELLOW}
+    snapshot_dt = _parse_iso(snapshot_at)
+    previous_dt = _parse_iso(previous_heartbeat_at)
 
     with _lock:
         with target.open(newline="", encoding="utf-8") as fh:
@@ -242,6 +262,12 @@ def reconcile_non_green_snapshot(
                 continue
             if house_id in snapshot:
                 continue
+            local_dt = _parse_iso(row.get("timestamp"))
+            if local_dt is not None:
+                if snapshot_dt is not None and local_dt > snapshot_dt:
+                    continue
+                if previous_dt is not None and local_dt > previous_dt:
+                    continue
             row["status_code"] = STATUS_GREEN
             row["timestamp"] = ts
             cleared.append(house_id)

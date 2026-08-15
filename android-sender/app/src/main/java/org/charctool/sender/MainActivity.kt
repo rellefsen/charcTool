@@ -113,6 +113,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onSend = viewModel::sendChanges,
                     onHeartbeat = viewModel::sendHeartbeat,
+                    onSiteRole = viewModel::setSiteRole,
                 )
             }
         }
@@ -148,6 +149,7 @@ fun SenderScreen(
     onConnect: () -> Unit,
     onSend: () -> Unit,
     onHeartbeat: () -> Unit,
+    onSiteRole: (String) -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("Block Status") }) },
@@ -182,11 +184,13 @@ fun SenderScreen(
                     enabled = !state.busy && state.hasSeed,
                     modifier = Modifier.weight(1f),
                 ) { Text("Send") }
-                OutlinedButton(
-                    onClick = onHeartbeat,
-                    enabled = !state.busy && state.hasSeed,
-                    modifier = Modifier.weight(1f),
-                ) { Text("Heartbeat") }
+                if (state.siteRole == ROLE_PRECINCT) {
+                    OutlinedButton(
+                        onClick = onHeartbeat,
+                        enabled = !state.busy && state.hasSeed,
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Heartbeat") }
+                }
             }
             AnimatedVisibility(visible = setupOpen) {
                 Card(modifier = Modifier.fillMaxWidth()) {
@@ -194,6 +198,27 @@ fun SenderScreen(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        Text("Site role", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = state.siteRole == ROLE_CAPTAIN,
+                                onClick = { onSiteRole(ROLE_CAPTAIN) },
+                                label = { Text("Captain") },
+                            )
+                            FilterChip(
+                                selected = state.siteRole == ROLE_PRECINCT,
+                                onClick = { onSiteRole(ROLE_PRECINCT) },
+                                label = { Text("Precinct") },
+                            )
+                        }
+                        Text(
+                            if (state.siteRole == ROLE_PRECINCT) {
+                                "Precinct phones may heartbeat. Do not also heartbeat this precinct from a laptop."
+                            } else {
+                                "Captains send house status only. District and city use the laptop app."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = onImport, enabled = !state.busy, modifier = Modifier.weight(1f)) {
                                 Text("Import seed")

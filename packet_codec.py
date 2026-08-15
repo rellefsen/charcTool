@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 
 from config import (
@@ -39,9 +40,9 @@ _LEGACY_BULK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Heartbeat markers: NS:SOUTH01:HB:S / NS:SOUTH01:HB:E
+# Heartbeat markers: NS:SOUTH01:HB:S / NS:SOUTH01:HB:S:2026-08-15T21:05:00Z / NS:SOUTH01:HB:E
 _HB_START_RE = re.compile(
-    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):HB:S$",
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):HB:S(?::(.+))?$",
     re.IGNORECASE,
 )
 _HB_END_RE = re.compile(
@@ -76,6 +77,7 @@ class ControlPacket:
     kind: ControlPacketKind
     precinct_id: str
     updates: tuple[MeshUpdate, ...] = ()
+    snapshot_at: str | None = None
 
 
 def encode_status(precinct_id: str, house_id: str, status_code: str) -> str:
@@ -275,9 +277,10 @@ def encode_bulk(precinct_id: str, rows: list[tuple[str, str]]) -> list[str]:
     ]
 
 
-def encode_heartbeat_start(precinct_id: str) -> str:
+def encode_heartbeat_start(precinct_id: str, snapshot_at: str | None = None) -> str:
     precinct_id = precinct_id.strip().upper()
-    return f"{PACKET_PREFIX}:{precinct_id}:HB:S"
+    stamp = snapshot_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"{PACKET_PREFIX}:{precinct_id}:HB:S:{stamp}"
 
 
 def encode_heartbeat_end(precinct_id: str) -> str:
@@ -364,9 +367,11 @@ def parse_control_packet(text: str) -> ControlPacket | None:
     text = text.strip()
     start_match = _HB_START_RE.match(text)
     if start_match:
+        snapshot_at = start_match.group(2)
         return ControlPacket(
             kind=ControlPacketKind.HEARTBEAT_START,
             precinct_id=start_match.group(1).upper(),
+            snapshot_at=snapshot_at.strip() if snapshot_at else None,
         )
 
     end_match = _HB_END_RE.match(text)
