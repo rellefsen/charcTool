@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import CSV_FIELDS, CSV_PATH, DEFAULT_HOUSES, STATUS_GREEN, STATUS_URGENCY
+from config import CSV_FIELDS, CSV_PATH, DEFAULT_HOUSES, STATUS_GREEN, STATUS_RED, STATUS_URGENCY, STATUS_YELLOW
 
 _lock = threading.Lock()
 
@@ -104,7 +104,7 @@ def read_all(path: Path | None = None) -> list[dict[str, str]]:
 
 
 def sort_rows_by_urgency(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Sort houses RED first, then YELLOW, then GREEN; ties by house_id."""
+    """Sort houses by urgency (RED, YELLOW, BLACK, GREEN); ties by house_id."""
     return sorted(
         rows,
         key=lambda r: (
@@ -220,13 +220,15 @@ def reconcile_non_green_snapshot(
     path: Path | None = None,
 ) -> list[str]:
     """
-    After a heartbeat snapshot, set any local RED/YELLOW house not in the snapshot to GREEN.
+    After a heartbeat snapshot, set local RED/YELLOW houses not in the snapshot to GREEN.
 
+    BLACK is never auto-cleared: a missing death is a lost packet, not a GREEN.
     Returns house IDs that were cleared.
     """
     target = path or CSV_PATH
     ensure_status_csv(target)
     snapshot = {house_id.strip().upper() for house_id in snapshot_house_ids}
+    clearable = {STATUS_RED, STATUS_YELLOW}
 
     with _lock:
         with target.open(newline="", encoding="utf-8") as fh:
@@ -236,7 +238,7 @@ def reconcile_non_green_snapshot(
         ts = _now_iso()
         for row in rows:
             house_id = row["house_id"].upper()
-            if row["status_code"] == STATUS_GREEN:
+            if row["status_code"] not in clearable:
                 continue
             if house_id in snapshot:
                 continue

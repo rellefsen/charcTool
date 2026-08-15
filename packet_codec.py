@@ -15,15 +15,15 @@ from config import (
     STATUS_WIRE,
 )
 
-# New wire format: NS:CHARC01:H001:R
+# New wire format: NS:CHARC01:H001:R  (R/Y/K/G — K is BLACK; B is bulk)
 _PACKET_RE = re.compile(
-    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):([A-Z0-9]{{1,8}}):([RYG])$",
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{4,12}}):([A-Z0-9]{{1,8}}):([RYKG])$",
     re.IGNORECASE,
 )
 
 # Legacy single-house format: NS:H001:R
 _LEGACY_PACKET_RE = re.compile(
-    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{1,8}}):([RYG])$",
+    rf"^{re.escape(PACKET_PREFIX)}:([A-Z0-9]{{1,8}}):([RYKG])$",
     re.IGNORECASE,
 )
 
@@ -55,7 +55,7 @@ _CLEAR_RE = re.compile(
     re.IGNORECASE,
 )
 
-_BULK_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})([RYG])$", re.IGNORECASE)
+_BULK_PART_RE = re.compile(r"^([A-Za-z0-9]{1,8})([RYKG])$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

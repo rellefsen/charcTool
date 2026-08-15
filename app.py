@@ -19,6 +19,7 @@ from config import (
     STATUS_COLORS,
     STATUS_GREEN,
     STATUS_LABELS,
+    STATUS_SORT_CAPTION,
     STATUS_URGENCY,
     MESH_MAX_PAYLOAD_BYTES,
 )
@@ -1272,7 +1273,11 @@ def _render_status_table(rows: list[dict], paths: PrecinctPaths) -> None:
         selected = cols[3].selectbox(
             f"Status for {house_id}",
             STATUS_CODES,
-            index=STATUS_CODES.index(current),
+            index=(
+                STATUS_CODES.index(current)
+                if current in STATUS_CODES
+                else STATUS_CODES.index(STATUS_GREEN)
+            ),
             format_func=lambda c: STATUS_LABELS[c],
             key=f"sel_{house_id}",
             label_visibility="collapsed",
@@ -1395,7 +1400,7 @@ def _render_transmitter_mode() -> None:
     st.title("📤 Transmitter Mode")
     st.caption(f"Precinct: **{precinct_label}**")
     st.caption("Update house statuses and sync to the mesh network.")
-    st.caption("Sorted by urgency: RED first, then YELLOW, then GREEN.")
+    st.caption(STATUS_SORT_CAPTION)
     st.caption("Only **changed** houses are sent when you click sync.")
 
     rows = sort_rows_by_urgency(read_all(path=paths.status))
@@ -1713,7 +1718,7 @@ def _render_receiver_mode() -> None:
     show_precinct = st.session_state.receiver_view_scope == "district"
     st.divider()
     st.subheader(f"{board_title} ({len(rows)} houses)")
-    st.caption("Read-only. Sorted by urgency: RED first, then YELLOW, then GREEN.")
+    st.caption(f"Read-only. {STATUS_SORT_CAPTION}")
     _render_print_board_actions(
         rows,
         title="Receiver Status Board",
@@ -1729,10 +1734,11 @@ def _render_receiver_mode() -> None:
     _render_readonly_board(rows, change_labels=change_labels, show_precinct=show_precinct)
 
     counts = {code: sum(1 for r in rows if r["status_code"] == code) for code in STATUS_CODES}
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("🔴 RED", counts.get("RED", 0))
     c2.metric("🟡 YELLOW", counts.get("YELLOW", 0))
-    c3.metric("🟢 GREEN", counts.get("GREEN", 0))
+    c3.metric("⬛ BLACK", counts.get("BLACK", 0))
+    c4.metric("🟢 GREEN", counts.get("GREEN", 0))
 
     st.caption("Auto-refreshing every 2 seconds…")
     time.sleep(2)
