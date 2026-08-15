@@ -8,18 +8,19 @@ class PacketCodecTest {
     @Test
     fun encodeSingleHouse() {
         assertEquals("NS:SOUTH01:H014:Y", PacketCodec.encodeStatus("south01", "h014", "YELLOW"))
+        assertEquals("NS:SOUTH01:H014:K", PacketCodec.encodeStatus("south01", "h014", "BLACK"))
     }
 
     @Test
     fun heartbeatSequence() {
         val packets = PacketCodec.buildHeartbeatPackets(
             "CHARC01",
-            listOf("H001" to "RED", "H014" to "YELLOW"),
+            listOf("H001" to "RED", "H014" to "YELLOW", "H020" to "BLACK"),
             listOf("H003"),
         )
         assertEquals("NS:CHARC01:HB:S", packets.first())
         assertEquals("NS:CHARC01:HB:E", packets.last())
-        assertTrue(packets.any { it.startsWith("NS:CHARC01:B:") })
+        assertTrue(packets.any { it.startsWith("NS:CHARC01:B:") && it.contains("H020K") })
         assertTrue(packets.any { it.startsWith("NS:CHARC01:C:") && it.contains("H003G") })
     }
 

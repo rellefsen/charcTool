@@ -5,9 +5,10 @@ object PacketCodec {
     const val MAX_PAYLOAD_BYTES = 233
     const val GREEN = "GREEN"
     const val YELLOW = "YELLOW"
+    const val BLACK = "BLACK"
     const val RED = "RED"
 
-    private val wire = mapOf(RED to "R", YELLOW to "Y", GREEN to "G")
+    private val wire = mapOf(RED to "R", YELLOW to "Y", BLACK to "K", GREEN to "G")
 
     fun encodeStatus(precinctId: String, houseId: String, status: String): String {
         val p = precinctId.trim().uppercase()

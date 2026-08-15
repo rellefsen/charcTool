@@ -1,15 +1,15 @@
 # Block Status
 
-Neighborhood block-captain status board over **Meshtastic**. Operators mark houses RED / YELLOW / GREEN; district laptops or phones transmit changes, and an EOC laptop listens and updates the same local CSVs.
+Neighborhood block-captain status board over **Meshtastic**. Operators mark houses RED / YELLOW / BLACK / GREEN; district laptops or phones transmit changes, and an EOC laptop listens and updates the same local CSVs.
 
-The GitHub repo is still [`rellefsen/charcTool`](https://github.com/rellefsen/charcTool). The mesh channel stays **`charcStatus`**. Packet format is unchanged.
+The GitHub repo is still [`rellefsen/charcTool`](https://github.com/rellefsen/charcTool). The mesh channel stays **`charcStatus`**. Status letters are **R / Y / K / G** (`K` is BLACK; `B` is the bulk packet kind).
 
 The laptop app talks to a Meshtastic radio over **USB serial** or **Bluetooth**. If no radio is present, it runs in **mock mode** so you can still edit boards and test the UI.
 
 ## What it does
 
 - **Transmitter** — edit a precinct board, sync status changes to the mesh, send hourly heartbeats of all non-green houses.
-- **Receiver** — listen for `NS:` packets and apply them to local CSVs; on heartbeat end, clear RED/YELLOW houses that were not in the snapshot (missed GREEN).
+- **Receiver** — listen for `NS:` packets and apply them to local CSVs; on heartbeat end, clear RED/YELLOW houses that were not in the snapshot (missed GREEN). BLACK is never auto-cleared.
 - **Organization** — districts and precincts, each with `house_addresses.csv` and `neighborhood_status.csv`.
 - **Manual seeding** — copy org and precinct files to every laptop. There is no over-air full data export.
 - **Text messages** — optional free-form chat on the same mesh channel.
@@ -199,7 +199,7 @@ H003,142 Pine Ave
 
 ### `neighborhood_status.csv`
 
-One file per precinct. Header required. `status_code` is `RED`, `YELLOW`, or `GREEN`. `timestamp` is UTC ISO-8601 with a `Z`. Seed every house **GREEN**.
+One file per precinct. Header required. `status_code` is `RED`, `YELLOW`, `BLACK`, or `GREEN`. On the wire, BLACK is **`K`**. `timestamp` is UTC ISO-8601 with a `Z`. Seed every house **GREEN**.
 
 ```csv
 house_id,status_code,timestamp

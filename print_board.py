@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from config import STATUS_BG, STATUS_CODES, STATUS_COLORS
+from config import STATUS_BG, STATUS_CODES, STATUS_COLORS, STATUS_SORT_CAPTION
 
 
 def format_board_timestamp(ts: str) -> str:
@@ -136,7 +136,7 @@ def build_printable_html(
   <div class="meta">
     {f"<div>{subtitle}</div>" if subtitle else ""}
     <div>Printed {printed_at}</div>
-    <div>Sorted by urgency: RED first, then YELLOW, then GREEN.</div>
+    <div>{STATUS_SORT_CAPTION}</div>
   </div>
   <table>
     <thead><tr>{header_html}</tr></thead>

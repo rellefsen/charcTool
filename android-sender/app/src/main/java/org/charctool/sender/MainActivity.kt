@@ -349,7 +349,7 @@ private fun HouseCard(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(house.houseId, style = MaterialTheme.typography.titleSmall)
@@ -366,6 +366,17 @@ private fun HouseCard(
         StatusChip("Y", "YELLOW", house.status, Color(0xFFEAB308), enabled) {
             onStatus(house.houseId, PacketCodec.YELLOW)
         }
+        StatusChip(
+            "K",
+            "BLACK",
+            house.status,
+            Color(0xFF111827),
+            enabled,
+            selectedLabelColor = Color(0xFFF9FAFB),
+            selectedContainerAlpha = 1f,
+        ) {
+            onStatus(house.houseId, PacketCodec.BLACK)
+        }
         StatusChip("G", "GREEN", house.status, Color(0xFF16A34A), enabled) {
             onStatus(house.houseId, PacketCodec.GREEN)
         }
@@ -379,6 +390,8 @@ private fun StatusChip(
     current: String,
     color: Color,
     enabled: Boolean,
+    selectedLabelColor: Color = color,
+    selectedContainerAlpha: Float = 0.25f,
     onClick: () -> Unit,
 ) {
     FilterChip(
@@ -387,8 +400,8 @@ private fun StatusChip(
         enabled = enabled,
         label = { Text(shortLabel) },
         colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
-            selectedContainerColor = color.copy(alpha = 0.25f),
-            selectedLabelColor = color,
+            selectedContainerColor = color.copy(alpha = selectedContainerAlpha),
+            selectedLabelColor = selectedLabelColor,
         ),
     )
 }

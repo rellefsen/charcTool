@@ -1,6 +1,6 @@
 # Block Status sender (Android)
 
-Phone app for **district transmitters only**. Mark houses RED / YELLOW / GREEN and send the same Meshtastic text packets as the laptop **Block Status** app.
+Phone app for **district transmitters only**. Mark houses RED / YELLOW / BLACK / GREEN and send the same Meshtastic text packets as the laptop **Block Status** app.
 
 It does **not** receive, reconcile heartbeats, or edit districts/precincts. EOC still runs full Block Status on a laptop.
 
@@ -12,7 +12,8 @@ Same wire format as `packet_codec.py`:
 
 ```
 NS:SOUTH01:H014:Y
-NS:SOUTH01:B:H001R,H014Y
+NS:SOUTH01:H020:K
+NS:SOUTH01:B:H001R,H014Y,H020K
 NS:SOUTH01:HB:S
 NS:SOUTH01:C:H003G
 NS:SOUTH01:HB:E
@@ -32,7 +33,7 @@ The house board is the main screen. Import, BLE scan, mock toggle, and delay liv
 3. Open **Setup**, turn **Mock** off.
 4. **Scan radios**, tap the Meshtastic node you want, then **Connect**.
 5. Pick the **channel** by name. If the radio has `charcStatus`, the app selects it automatically.
-6. Mark houses R / Y / G, then **Send**. Use **Heartbeat** when EOC needs a full non-green snapshot.
+6. Mark houses R / Y / K / G (`K` is BLACK), then **Send**. Use **Heartbeat** when EOC needs a full non-green snapshot.
 
 Pair the radio in Android Bluetooth, then **disconnect** (stay paired). Close the official Meshtastic Android app while this app holds BLE — one client at a time.
 

@@ -28,13 +28,15 @@ ADDRESS_FIELDS = ("house_id", "address")
 # Status codes — single-letter wire format in mesh packets
 STATUS_RED = "RED"
 STATUS_YELLOW = "YELLOW"
+STATUS_BLACK = "BLACK"
 STATUS_GREEN = "GREEN"
 
-STATUS_CODES = (STATUS_RED, STATUS_YELLOW, STATUS_GREEN)
+STATUS_CODES = (STATUS_RED, STATUS_YELLOW, STATUS_BLACK, STATUS_GREEN)
 
 STATUS_WIRE = {
     STATUS_RED: "R",
     STATUS_YELLOW: "Y",
+    STATUS_BLACK: "K",
     STATUS_GREEN: "G",
 }
 
@@ -44,18 +46,21 @@ STATUS_FROM_WIRE = {v: k for k, v in STATUS_WIRE.items()}
 STATUS_LABELS = {
     STATUS_RED: "RED — Life threatening, immediate assistance",
     STATUS_YELLOW: "YELLOW — Assistance needed",
+    STATUS_BLACK: "BLACK — Death; help no longer needed",
     STATUS_GREEN: "GREEN — OK",
 }
 
 STATUS_COLORS = {
     STATUS_RED: "#DC2626",
     STATUS_YELLOW: "#EAB308",
+    STATUS_BLACK: "#F9FAFB",
     STATUS_GREEN: "#16A34A",
 }
 
 STATUS_BG = {
     STATUS_RED: "#FEE2E2",
     STATUS_YELLOW: "#FEF9C3",
+    STATUS_BLACK: "#111827",
     STATUS_GREEN: "#DCFCE7",
 }
 
@@ -63,8 +68,11 @@ STATUS_BG = {
 STATUS_URGENCY = {
     STATUS_RED: 0,
     STATUS_YELLOW: 1,
-    STATUS_GREEN: 2,
+    STATUS_BLACK: 2,
+    STATUS_GREEN: 3,
 }
+
+STATUS_SORT_CAPTION = "Sorted by urgency: RED, YELLOW, BLACK, then GREEN."
 
 # Mesh packet prefix — identifies neighborhood-status messages
 PACKET_PREFIX = "NS"

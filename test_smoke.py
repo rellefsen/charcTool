@@ -91,9 +91,15 @@ def test_urgency_sort() -> None:
     rows = [
         {"house_id": "H003", "status_code": "GREEN", "timestamp": "t"},
         {"house_id": "H001", "status_code": "RED", "timestamp": "t"},
+        {"house_id": "H004", "status_code": "BLACK", "timestamp": "t"},
         {"house_id": "H002", "status_code": "YELLOW", "timestamp": "t"},
     ]
-    assert [r["house_id"] for r in sort_rows_by_urgency(rows)] == ["H001", "H002", "H003"]
+    assert [r["house_id"] for r in sort_rows_by_urgency(rows)] == [
+        "H001",
+        "H002",
+        "H004",
+        "H003",
+    ]
 
     from sync_state import HouseChange
 
@@ -112,6 +118,10 @@ def test_packet_codec() -> None:
     assert pkt == "NS:CHARC01:H001:R"
     decoded = decode_packet(pkt)
     assert decoded == MeshUpdate(precinct_id="CHARC01", house_id="H001", status_code="RED")
+    assert encode_status("SOUTH01", "H014", "BLACK") == "NS:SOUTH01:H014:K"
+    assert decode_packet("NS:SOUTH01:H014:K") == MeshUpdate(
+        precinct_id="SOUTH01", house_id="H014", status_code="BLACK"
+    )
     assert decode_packet("hello mesh") is None
 
     bulk = encode_bulk_sync(
@@ -401,10 +411,11 @@ def test_field_checklist_html() -> None:
         packet_delay=2.0,
         heartbeat_seconds=3600.0,
     )
-    assert "Meshtastic field checklist" in html
+    assert "Block Status field checklist" in html
     assert "charcStatus" in html
     assert "mock mode" in html
     assert "NS:SOUTH01:HB:E" in html
+    assert "BLACK is never auto-cleared" in html
     assert "Do not go live" in html
     assert "Bluetooth" in html
     print("field_checklist: OK")
@@ -597,10 +608,12 @@ def test_heartbeat_reconcile(tmp_path) -> None:
         csv_store.update_status("H001", "RED", path=paths.status)
         csv_store.update_status("H002", "YELLOW", path=paths.status)
         csv_store.update_status("H003", "GREEN", path=paths.status)
+        csv_store.update_status("H005", "BLACK", path=paths.status)
+        csv_store.update_status("H006", "BLACK", path=paths.status)
 
         packets = build_heartbeat_packets(
             "CHARC01",
-            [("H001", "RED")],
+            [("H001", "RED"), ("H006", "BLACK")],
             [("H004", "GREEN")],
         )
         assert packets[0] == encode_heartbeat_start("CHARC01")
@@ -616,6 +629,8 @@ def test_heartbeat_reconcile(tmp_path) -> None:
         assert rows["H002"] == "GREEN"
         assert rows["H003"] == "GREEN"
         assert rows["H004"] == "GREEN"
+        assert rows["H005"] == "BLACK"
+        assert rows["H006"] == "BLACK"
         assert "CHARC01" in receiver.stats.last_heartbeat_at
     finally:
         config.ORGANIZATION_PATH = orig_org
@@ -704,7 +719,12 @@ if __name__ == "__main__":
     test_text_messages()
     test_node_display_name()
     test_text_message_dispatch()
-    test_global_pubsub_routing()
+    try:
+        test_global_pubsub_routing()
+    except ModuleNotFoundError as exc:
+        if exc.name != "pubsub":
+            raise
+        print("global_pubsub_routing: skipped (pypubsub not installed)")
     with tempfile.TemporaryDirectory() as tmp:
         test_heartbeat_reconcile(Path(tmp))
         test_recent_clears_store(Path(tmp))

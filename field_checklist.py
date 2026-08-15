@@ -169,7 +169,7 @@ def build_field_checklist_html(
     <thead><tr><th>When</th><th>What</th><th>Example</th></tr></thead>
     <tbody>
       <tr><td>Operator commit</td><td>SYNC TO MESH sends only changed houses as <code>NS:</code> packets.</td><td><code>NS:SOUTH01:H014:Y</code></td></tr>
-      <tr><td>Hourly heartbeat</td><td>HB:S, all non-green houses, optional recent GREEN clears, then HB:E. EOC sets missing RED/YELLOW houses back to GREEN.</td><td><code>NS:SOUTH01:HB:S</code> … <code>NS:SOUTH01:B:H001R,H014Y</code> … <code>NS:SOUTH01:HB:E</code></td></tr>
+      <tr><td>Hourly heartbeat</td><td>HB:S, all non-green houses (including BLACK), optional recent GREEN clears, then HB:E. EOC sets missing RED/YELLOW houses back to GREEN. BLACK is never auto-cleared.</td><td><code>NS:SOUTH01:HB:S</code> … <code>NS:SOUTH01:B:H001R,H014Y,H020K</code> … <code>NS:SOUTH01:HB:E</code></td></tr>
     </tbody>
   </table>
 
