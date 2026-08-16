@@ -1,0 +1,21 @@
+---
+description: Feature branches first; “ship it” means PR, merge, and release artifacts.
+alwaysApply: true
+---
+
+# Git and release workflow
+
+## New functionality
+
+Create and check out a feature branch from `main` **before** writing code. Do not implement features on `main`.
+
+- Branch name: `cursor/<short-topic>`
+
+## When the user says **ship it** (or **release this**)
+
+That is the full publish path, not a git push onto `main`. Also treat **push to main** as the same request.
+
+1. Commit on the **feature branch**.
+2. Push the feature branch to GitHub (`-u` if needed).
+3. Open a pull request into `main` and merge it.
+4. If this repo ships Android APKs: bump `versionCode` / `versionName`, rebuild debug APKs, GitHub Release with assets. Do not commit APKs to git.
